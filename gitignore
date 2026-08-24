@@ -1,0 +1,20 @@
+# Entorno virtual
+venv/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Logs y dataset generados (no versionar salidas de simulación)
+*.log
+*.csv
+
+# Mininet
+*.pcap
+
+# Editores / SO
+.vscode/
+.idea/
+.DS_Store
