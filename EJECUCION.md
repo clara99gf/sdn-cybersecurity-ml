@@ -12,6 +12,9 @@ sudo venv/bin/python3 run_all.py
 Esto arranca el controlador Ryu, espera a que esté listo, levanta la
 topología Mininet, genera el tráfico y al terminar (o con `Ctrl+C`)
 detiene el controlador y limpia el estado de Mininet automáticamente.
+Si el controlador no llega a arrancar, `run_all.py` te muestra
+directamente en la terminal las últimas líneas de su log — no hace
+falta ir a buscarlo aparte.
 
 > **Por qué `sudo venv/bin/python3` y no `sudo python3`**: Mininet
 > necesita privilegios de root, y `sudo` por defecto ignora el venv
@@ -39,10 +42,14 @@ sudo ../venv/bin/python3 topology.py
 
 ## Dónde queda todo
 
-- Dataset: `/tmp/dataset_sdn.csv`
-- Log del controlador Ryu: `/tmp/ryu_controller.log`
+Todo se guarda dentro del propio proyecto (no en `/tmp`), para que sea
+siempre visible con tu usuario normal aunque ejecutes con `sudo`:
+
+- Dataset: `data/dataset_sdn.csv`
+- Log del controlador Ryu: `logs/ryu_controller.log`
 - Log de la generación de tráfico (útil si una clase no aparece en el
-  CSV — revisa aquí primero): `/tmp/traffic_generator.log`
+  CSV — revisa aquí primero): `logs/traffic_generator.log`
+- Estado efímero compartido (etiqueta activa): `runtime/current_label.txt`
 
 (rutas configurables en `config.py`, raíz del proyecto)
 

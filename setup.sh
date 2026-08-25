@@ -37,11 +37,43 @@ if [ ! -d "venv" ]; then
 fi
 
 echo "=== 3. Instalando dependencias Python dentro del venv ==="
+# PYTHONNOUSERSITE=1 evita que pip dé por "ya satisfecha" una
+# dependencia que solo esté instalada en ~/.local (instalación por
+# usuario) en vez de dentro del propio venv/. Sin esto, un paquete
+# como scapy podía quedar visible cuando lo pruebas como tu usuario
+# normal, pero NO visible para los procesos que corren con sudo
+# (root tiene su propio ~/.local, distinto del tuyo).
+export PYTHONNOUSERSITE=1
 ./venv/bin/pip install --upgrade pip
 ./venv/bin/pip install -r requirements.txt
 
 echo "=== 4. Instalando el proyecto en modo editable (pip install -e .) ==="
 ./venv/bin/pip install -e .
+
+echo "=== 5. Verificando dependencias tal y como se ejecutarán de verdad (con sudo) ==="
+# El pipeline entero corre con sudo (Mininet lo requiere), y con sudo
+# el $HOME suele pasar a ser /root -distinto del tuyo-. Un paquete que
+# se ve bien al probarlo como tu usuario normal puede seguir sin verse
+# para el proceso real. Lo comprobamos aquí mismo, en las mismas
+# condiciones en las que luego se ejecutará run_all.py (por eso el
+# "sudo" en la comprobación). La REINSTALACIÓN, en cambio, se hace SIN
+# sudo: el venv/ es tuyo, y usar sudo ahí dejaría archivos propiedad de
+# root dentro que luego te den "Permission denied" al hacer tú un pip
+# install normal.
+if sudo env PYTHONNOUSERSITE=1 ./venv/bin/python3 -c "import scapy" 2>/dev/null; then
+    echo "OK: scapy es visible ejecutando con sudo."
+else
+    echo "AVISO: scapy NO es visible ejecutando con sudo (así es como corre"
+    echo "run_all.py). Forzando reinstalación dentro del propio venv..."
+    ./venv/bin/pip install --force-reinstall --no-deps --ignore-installed scapy
+    if sudo env PYTHONNOUSERSITE=1 ./venv/bin/python3 -c "import scapy" 2>/dev/null; then
+        echo "OK: solucionado."
+    else
+        echo "ERROR: scapy sigue sin verse con sudo. Ejecuta esto para ver el"
+        echo "error exacto y compártelo:"
+        echo "  sudo env PYTHONNOUSERSITE=1 venv/bin/python3 -c \"import sys; print(sys.executable); print(sys.path); import scapy\""
+    fi
+fi
 
 echo
 echo "=== Instalación completa ==="
