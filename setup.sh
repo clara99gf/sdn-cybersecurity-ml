@@ -2,16 +2,16 @@
 # setup.sh
 # --------
 # Instala TODO lo necesario para este proyecto: paquetes de sistema
-# (Mininet, Open vSwitch, nmap, hping3, iperf, python3-venv) y crea un
-# entorno virtual con las dependencias Python (ryu, scapy) desde
-# requirements.txt.
+# (Mininet, Open vSwitch, nmap, hping3, iperf, ping, python3-venv) y crea
+# un entorno virtual con las dependencias Python (ryu, scapy, declaradas
+# en setup.py) instaladas junto con el propio proyecto.
 #
 # Uso:
 #   chmod +x setup.sh
 #   ./setup.sh
 #
 # (los comandos para EJECUTAR el proyecto, una vez instalado, están en
-#  EJECUCION.md, no aquí)
+#  EJECUCION.md)
 
 set -e
 
@@ -26,8 +26,9 @@ sudo apt-get install -y \
     nmap \
     hping3 \
     iperf \
-    net-tools
+    iputils-ping
 
+echo
 echo "=== 2. Creando entorno virtual (venv/) ==="
 # --system-site-packages es IMPORTANTE: así el venv puede seguir viendo
 # el paquete "mininet" instalado a nivel de sistema (apt), mientras que
@@ -36,30 +37,22 @@ if [ ! -d "venv" ]; then
     python3 -m venv --system-site-packages venv
 fi
 
-echo "=== 3. Instalando dependencias Python dentro del venv ==="
-# PYTHONNOUSERSITE=1 evita que pip dé por "ya satisfecha" una
-# dependencia que solo esté instalada en ~/.local (instalación por
-# usuario) en vez de dentro del propio venv/. Sin esto, un paquete
-# como scapy podía quedar visible cuando lo pruebas como tu usuario
-# normal, pero NO visible para los procesos que corren con sudo
-# (root tiene su propio ~/.local, distinto del tuyo).
+echo
+echo "=== 3. Instalando el proyecto y sus dependencias (pip install -e .) ==="
+# Las dependencias (ryu, scapy) están declaradas en setup.py
+# (install_requires), así que "pip install -e ." las instala junto con
+# el propio proyecto en modo editable -no hace falta un requirements.txt
+# aparte-.
+# NOTA: PYTHONNOUSERSITE=1 evita que pip dé por satisfecha una dependencia
+# presente en ~/.local (instalación de usuario). Garantiza que las librerías
+# se instalen explícitamente dentro de venv/, haciéndolas visibles tanto para
+# el usuario estándar como para el superusuario (root) al ejecutar con sudo.
 export PYTHONNOUSERSITE=1
 ./venv/bin/pip install --upgrade pip
-./venv/bin/pip install -r requirements.txt
-
-echo "=== 4. Instalando el proyecto en modo editable (pip install -e .) ==="
 ./venv/bin/pip install -e .
 
-echo "=== 5. Verificando dependencias tal y como se ejecutarán de verdad (con sudo) ==="
-# El pipeline entero corre con sudo (Mininet lo requiere), y con sudo
-# el $HOME suele pasar a ser /root -distinto del tuyo-. Un paquete que
-# se ve bien al probarlo como tu usuario normal puede seguir sin verse
-# para el proceso real. Lo comprobamos aquí mismo, en las mismas
-# condiciones en las que luego se ejecutará run_all.py (por eso el
-# "sudo" en la comprobación). La REINSTALACIÓN, en cambio, se hace SIN
-# sudo: el venv/ es tuyo, y usar sudo ahí dejaría archivos propiedad de
-# root dentro que luego te den "Permission denied" al hacer tú un pip
-# install normal.
+echo
+echo "=== 4. Verificando dependencias tal y como se ejecutarán de verdad (con sudo) ==="
 if sudo env PYTHONNOUSERSITE=1 ./venv/bin/python3 -c "import scapy" 2>/dev/null; then
     echo "OK: scapy es visible ejecutando con sudo."
 else

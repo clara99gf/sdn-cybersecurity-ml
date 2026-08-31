@@ -5,10 +5,10 @@ arp_spoof.py
 Envía respuestas ARP falsificadas de forma continua para simular un
 ataque de ARP spoofing dentro del laboratorio Mininet.
 
-Uso:
+Ejecución:
     python3 arp_spoof.py <ip_victima> <ip_a_suplantar> <mac_atacante>
 
-Se detiene con Ctrl+C o al recibir SIGTERM (pkill).
+Se detiene con Ctrl+C o al recibir SIGTERM.
 """
 import sys
 import time
@@ -27,9 +27,8 @@ def main():
 
     try:
         while True:
-            # engaña a la víctima haciéndole creer que somos "spoofed_ip"
             send_fake_arp(victim_ip, spoofed_ip)
-            # y también al revés, para envenenar la caché en ambos sentidos
+            # También al revés, para envenenar la caché en ambos sentidos
             send_fake_arp(spoofed_ip, victim_ip)
             time.sleep(1)
     except KeyboardInterrupt:

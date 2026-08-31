@@ -16,20 +16,13 @@ ninguna fase puede generar más de MAX_ROWS_PER_PHASE filas (ver
 config.py), para que TARGET_ROWS se reparta entre muchas fases
 distintas en vez de que una sola acapare el dataset.
 
-IMPORTANTE sobre cómo se matan los procesos: los ataques de larga
-duración (hping3 de ddos/ip-spoofing, arp_spoof.py) se lanzan
-capturando su PID real (con "echo $!") y se matan por ESE PID exacto
-con SIGKILL, en vez de confiar solo en "pkill -f <nombre>" por patrón
-de texto -que en la práctica no siempre mataba el proceso a tiempo, y
-dejaba un DDoS "zombi" generando tráfico real durante fases
-posteriores, mal etiquetado con la clase que tocara en cada momento-.
-El pkill por patrón se mantiene además como red de seguridad adicional.
+Dependencias de red (instaladas mediante setup.sh a nivel de sistema / venv):
+    - Binarios Linux: ping, iperf, nmap, hping3.
+    - Librería Python: scapy.
 
-Requisitos en las imágenes de host de Mininet:
-    - iperf
-    - nmap
-    - hping3
-    - scapy (pip3 install scapy)
+Ejecución:
+    Este módulo es coordinado automáticamente por el orquestador principal
+    run_all.py (ver EJECUCION.md).
 """
 
 import os
@@ -37,6 +30,7 @@ import random
 import sys
 import time
 
+# Red de seguridad: ver la misma nota en topology.py.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 
@@ -97,13 +91,12 @@ def _request_flush():
 
 
 def _sleep_with_cap(duration, baseline_rows, phase_name, step=0.3):
-    """Duerme en bloques cortos comprobando el tope de filas por fase; si
-    se supera, corta antes de agotar 'duration' y pide un vaciado
-    inmediato de las tablas de flujo. Devuelve True si cortó.
-    step pequeño (0.3s) es importante: un solo nmap con rango de puertos
-    amplio puede crear cientos de flujos en menos de un segundo, así que
-    comprobar el tope solo una vez por segundo (o menos) dejaba pasar
-    desbordamientos de miles de filas antes de darnos cuenta."""
+    """
+    Sustituye la espera pasiva (time.sleep) dividiéndola en intervalos breves (step=0.3s).
+
+    En cada ciclo verifica si se ha excedido el máximo de filas de la fase. Si se alcanza
+    el tope, solicita el vaciado inmediato de flujos y aborta la fase de forma anticipada.
+    """
     elapsed = 0.0
     while elapsed < duration:
         chunk = min(step, duration - elapsed)
@@ -121,45 +114,46 @@ def _sleep_with_cap(duration, baseline_rows, phase_name, step=0.3):
 # Lanzar/matar procesos en segundo plano por PID exacto
 # ------------------------------------------------------------------ #
 def _start_bg(host, cmd):
-    """Lanza 'cmd' en segundo plano en 'host' y devuelve su PID real
-    (vía "echo $!", en el mismo shell persistente de ese host)."""
+    """
+    Ejecuta un comando en segundo plano en la shell del host y recupera su PID exacto.
+    Redirige STDOUT y STDERR hacia el archivo de log global.
+    """
     host.cmd(f"{cmd} > {LOG_FILE} 2>&1 &")
     pid = host.cmd("echo $!").strip()
     return pid
 
 
 def _kill_pid(host, pid):
-    """Mata por PID exacto (SIGKILL). Más fiable que pkill -f por patrón."""
+    """Mata por PID exacto (SIGKILL)."""
     if pid and pid.isdigit():
         host.cmd(f"kill -9 {pid} 2>/dev/null")
 
 
 def _kill_all_attack_tools():
-    """Red de seguridad ADICIONAL (por patrón de texto, todo el sistema):
+    """Red de seguridad ADICIONAL:
     mata cualquier proceso de las herramientas de tráfico que pudiera
-    haber quedado vivo pese al kill por PID (p.ej. de una ejecución
-    anterior interrumpida a la fuerza). Se llama al empezar CADA fase."""
+    haber quedado vivo pese al kill por PID. Se llama al empezar CADA fase."""
     for proc in ("hping3", "nmap", "arp_spoof.py", "iperf", "ping"):
         os.system(f"pkill -9 -f {proc} 2>/dev/null")
 
 
 def _arp_warmup(net, attacker, targets):
-    """Resuelve la MAC de 'targets' desde 'attacker' ANTES de cambiar la
-    etiqueta, para que la resolución ARP (tráfico legítimo) no quede mal
-    etiquetada como ddos/scanning si el atacante no tenía la MAC en caché."""
+    """
+    Fuerza la resolución ARP previa entre el host atacante y los objetivos.
+
+    Asegura que el tráfico de descubrimiento ARP (legítimo) se registre antes de
+    que se active la etiqueta de ataque en el controlador SDN.
+    """
     for t in targets:
         attacker.cmd(f"ping -c 1 -W 1 {t.IP()} > /dev/null 2>&1")
 
 
 def check_required_tools(net):
     """
-    Comprueba, en un host cualquiera, que las herramientas necesarias
-    estén instaladas (incluida scapy, vía PYTHON_BIN). Si falta alguna,
-    avisa (esa fase no generará tráfico real aunque el script no falle,
-    así que si luego no ves una clase en el CSV, revisa primero este
-    aviso y el LOG_FILE).
+    Verifica que las herramientas de sistema y librerías de Python requeridas
+    estén estén disponibles desde los hosts virtuales de Mininet.
     """
-    tools = ["nmap", "hping3", "iperf"]
+    tools = ["ping", "nmap", "hping3", "iperf"]
     h = net.hosts[0]
     missing = [t for t in tools if not h.cmd(f"which {t}").strip()]
 
@@ -183,7 +177,7 @@ def check_required_tools(net):
 
 
 # ------------------------------------------------------------------ #
-# Fase: tráfico normal (varias variantes)
+# Fase: tráfico normal
 # ------------------------------------------------------------------ #
 def normal_traffic(net, duration):
     """Tráfico benigno: alterna ping, iperf TCP e iperf UDP entre hosts aleatorios."""
@@ -229,24 +223,14 @@ def normal_traffic(net, duration):
 
 
 # ------------------------------------------------------------------ #
-# Fase: scanning (varios tipos y velocidades de escaneo)
+# Fase: scanning
 # ------------------------------------------------------------------ #
 def scanning_traffic(net, duration):
-    """Escaneo de red/puertos con nmap desde un host atacante hacia varios objetivos.
-
-    IMPORTANTE: se usa '-Pn' en todos los escaneos para que nmap NO haga
-    primero un descubrimiento de host (ping scan) y lo dé por "caído" si
-    ese descubrimiento falla. Y se resuelve el ARP de los objetivos ANTES
-    de poner la etiqueta "scanning" (ver _arp_warmup), para que esa
-    resolución no quede mal etiquetada.
-
-    Un solo "nmap -p 1-200 -T5" puede recorrer 200 puertos en bien menos
-    de un segundo -cada puerto es un flujo OpenFlow distinto-, así que:
-    (a) los rangos de puertos y la plantilla de velocidad se mantienen
-    moderados (nunca ambos al máximo a la vez), y (b) es secuencial -se
-    mata cada nmap antes de lanzar el siguiente, comprobando el tope de
-    filas en pasos de 0.3s mientras tanto- en vez de ir acumulando varios
-    escaneos solapados sin control.
+    """
+    Simula escaneos de puertos/red con nmap hacia hosts objetivos.
+    Aplica el parámetro -Pn para evitar el descubrimiento de hosts mediante
+    ICMP y utiliza diferentes tipos y velocidades de escaneo de forma
+    aleatoria y secuencial para generar tráfico de scanning controlado.
     """
     hosts = net.hosts
     attacker = random.choice(hosts)
@@ -312,7 +296,7 @@ def _arp_spoofing(net, duration, baseline):
 
 def _ip_spoofing(net, duration, baseline):
     """El atacante envía TCP a 'victim' falsificando la IP origen como si
-    fuera 'fake_source' (spoofing de capa IP, distinto del ARP spoofing).
+    fuera 'fake_source'.
     Puerto origen fijo (-k -s) para no generar un flujo nuevo por paquete."""
     hosts = net.hosts
     attacker = random.choice(hosts)
@@ -330,17 +314,12 @@ def _ip_spoofing(net, duration, baseline):
 
 
 # ------------------------------------------------------------------ #
-# Fase: ddos (varios protocolos e intensidades)
+# Fase: ddos
 # ------------------------------------------------------------------ #
 def ddos_traffic(net, duration):
-    """DDoS distribuido: varios hosts inundan a una víctima (SYN/UDP/ICMP,
-    con intensidad variable: flood a máxima velocidad o tasa acotada).
-
-    IMPORTANTE: '-k -s <puerto>' fija el puerto origen (si no, hping3 lo
-    cambia en cada paquete y dispara una entrada de flujo nueva por
-    paquete). Y se resuelve el ARP de la víctima ANTES de poner la
-    etiqueta "ddos" (ver _arp_warmup), para que esa resolución no quede
-    mal etiquetada.
+    """
+    Ejecuta ataques de denegación de servicio distribuidos usando múltiples atacantes.
+    Alterna vectores de ataque (SYN, UDP, ICMP) e intensidades (flood o tasa limitada).
     """
     hosts = net.hosts
     victim = random.choice(hosts)
@@ -380,12 +359,10 @@ def ddos_traffic(net, duration):
 # ------------------------------------------------------------------ #
 def generate_dataset(net, total_duration=None, min_phase=None, max_phase=None, target_rows=None):
     """
-    Ejecuta fases de tráfico intercaladas aleatoriamente. El criterio de
-    parada REAL es target_rows (nº de filas en el CSV): en cuanto se
-    alcanza, se corta la generación aunque no haya pasado total_duration.
-    total_duration actúa solo como techo de seguridad. Además, ninguna
-    fase individual puede superar MAX_ROWS_PER_PHASE. Todo ajustable en
-    config.py.
+    Coordina la secuencia global de fases de tráfico.
+
+    El proceso finaliza al alcanzar la meta de registros ('target_rows')
+    o al cumplirse el tiempo límite ('total_duration').
     """
     total_duration = total_duration or config.TOTAL_DURATION
     min_phase = min_phase or config.MIN_PHASE_DURATION

@@ -3,7 +3,8 @@
 sdn_monitor.py
 --------------
 Controlador Ryu (OpenFlow 1.3) que combina:
-  1) Un switch L2 "aprendiz" que instala reglas de flujo granulares
+  1) Una lógica de conmutación L2 de tipo "learning switch",
+     implementada en el controlador, que instala reglas de flujo granulares
      (por IP origen/destino, protocolo, puertos, o campos ARP) para que
      cada "conversación" de red genere entradas de flujo diferenciadas.
   2) Un monitor periódico que consulta OFPFlowStatsRequest a cada switch
@@ -18,6 +19,9 @@ generador de tráfico: solo lee "cuál es la fase actual".
 
 Ejecución:
     ryu-manager sdn_monitor.py
+
+(normalmente no se necesita ejecutar esto directamente: se usa run_all.py
+en la raíz del proyecto, ver EJECUCION.md)
 """
 
 import csv
@@ -26,8 +30,9 @@ import sys
 import time
 from datetime import datetime
 
-# Permite "import config" independientemente del cwd desde el que
-# ryu-manager cargue este fichero.
+# Red de seguridad: ver la misma nota en topology.py/traffic_generator.py.
+# Sin esto, "import config" depende enteramente de que "pip install -e ."
+# se haya ejecutado correctamente en el venv.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 
@@ -40,7 +45,7 @@ from ryu.lib import hub
 from ryu.lib.packet import packet, ethernet, ether_types, ipv4, tcp, udp, arp
 
 # ------------------------------------------------------------------ #
-# CONFIGURACIÓN - centralizada en config.py (raíz del proyecto)
+# CONFIGURACIÓN - Centralizada en config.py 
 # ------------------------------------------------------------------ #
 LABEL_FILE = config.LABEL_FILE
 FLUSH_REQUEST_FILE = config.FLUSH_REQUEST_FILE
@@ -73,11 +78,12 @@ class SDNFlowMonitor(app_manager.RyuApp):
         super(SDNFlowMonitor, self).__init__(*args, **kwargs)
         self.mac_to_port = {}
         self.datapaths = {}
-        # key -> (packet_count, byte_count, timestamp) para calcular tasas (pps/bps)
+        # flow_key -> (packet_count, byte_count, timestamp)
+        # Guarda la lectura del ciclo anterior para calcular tasas diferenciales (pps y bps)
         self.prev_stats = {}
-        # key -> (paquetes, bytes) "invisibles" para OVS: el paquete que
-        # dispara el PacketIn y la instalación de la regla NUNCA se
-        # cuenta en las estadísticas de esa regla (ver _packet_in_handler)
+        # flow_key -> (packet_count, byte_count) 
+        # Compensación para el primer paquete de un flujo: el paquete que desencadena el 
+        # PacketIn no incrementa los contadores del FlowStats devuelto por el switch.
         self.pending_offsets = {}
         self._last_label = None
         self._last_flush_request = None
@@ -91,11 +97,8 @@ class SDNFlowMonitor(app_manager.RyuApp):
     # CSV
     # ---------------------------------------------------------- #
     def _reset_flush_request_file(self):
-        """Ver _label_watch_loop: el generador de tráfico puede pedir un
-        vaciado de tablas AHORA MISMO (sin esperar a un cambio de
-        etiqueta) escribiendo un timestamp nuevo aquí -lo usa cuando una
-        fase supera MAX_ROWS_PER_PHASE a mitad de fase, para no seguir
-        muestreando flujos ya creados durante el resto de su vida útil."""
+        """Limpia el archivo FLUSH_REQUEST_FILE escribiendo "0" para indicar
+        que no hay peticiones de purga de flujos pendientes."""
         try:
             with open(FLUSH_REQUEST_FILE, "w") as f:
                 f.write("0")
@@ -110,21 +113,12 @@ class SDNFlowMonitor(app_manager.RyuApp):
             return "0"
 
     def _reset_label_file(self):
-        """Si una ejecución anterior se interrumpió (Ctrl+C) a mitad de una
-        fase, runtime/current_label.txt se queda con esa etiqueta puesta.
-        Sin este reset, TODO el tráfico de arranque (pingAll) de la
-        ejecución NUEVA -antes de que el generador llame a set_label() por
-        primera vez- se etiquetaría con la etiqueta vieja (p.ej. 'ddos'),
-        que es exactamente lo que explicaba filas ARP de pingAll con
-        flow_count muy alto apareciendo como 'ddos'.
-
-        Se usa "warmup" (no "normal"): el pingAll() inicial es tráfico
-        benigno de verdad, pero muy homogéneo (240 pares de hosts, 1-2
-        paquetes cada uno) y puede acabar siendo la mayoría de las filas
-        "normal" si la primera fase elegida al azar también es normal,
-        diluyendo la variedad que sí aporta normal_traffic() (ping/iperf
-        TCP/UDP). Con una etiqueta propia, decides tú en el preprocesado
-        si la incluyes como tráfico normal más, o la filtras."""
+        """Inicializa LABEL_FILE con "warmup" al arrancar el controlador.
+        
+        Previene etiquetar el arranque con valores de ejecuciones anteriores
+        interrumpidas y permite aislar el tráfico repetitivo de comprobación 
+        inicial (pingAll) de la clase de tráfico "normal" real.
+        """
         try:
             with open(LABEL_FILE, "w") as f:
                 f.write("warmup")
@@ -179,7 +173,7 @@ class SDNFlowMonitor(app_manager.RyuApp):
     def _install_table_miss(self, datapath):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
-        # regla de table-miss: todo lo desconocido va al controlador
+        # Regla de table-miss: todo lo desconocido va al controlador
         match = parser.OFPMatch()
         actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, ofproto.OFPCML_NO_BUFFER)]
         self._add_flow(datapath, 0, match, actions, idle_timeout=0, hard_timeout=0)
@@ -195,12 +189,12 @@ class SDNFlowMonitor(app_manager.RyuApp):
         datapath.send_msg(mod)
 
     def _flow_key(self, dpid, get_field):
-        """Construye la clave de un flujo de forma consistente, tanto desde
-        match_fields (dict, en el packet_in) como desde stat.match (OFPMatch,
-        en la respuesta de estadísticas) -ambos exponen .get(campo, defecto).
-        Incluye los campos ARP para que dos conversaciones ARP distintas
-        entre el mismo par de MACs (spa/tpa/op distintos) no compartan
-        clave -si no, sus contadores/offsets pendientes se mezclarían-."""
+        """Genera una tupla identificadora única (DNI) para cada flujo.
+        
+        Usa get_field para extraer de forma homogénea tanto diccionarios (PacketIn) 
+        como objetos OFPMatch (FlowStats), incluyendo campos L2/L3/L4 y ARP para 
+        evitar colisiones de contadores entre conversaciones distintas.
+        """
         return (
             dpid,
             get_field("eth_src", ""), get_field("eth_dst", ""),
@@ -214,10 +208,13 @@ class SDNFlowMonitor(app_manager.RyuApp):
 
     # ---------------------------------------------------------- #
     # Switch L2 con reglas granulares (para que cada "conversación"
-    # de red -normal, escaneo, ddos, spoofing- genere flujos propios)
+    # de red -normal, scanning, ddos, spoofing- genere flujos propios)
     # ---------------------------------------------------------- #
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
+        """Maneja paquetes desconocidos (table-miss): aprende direcciones MAC,
+        construye reglas granulares (L2-L4/ARP) y reenvía el paquete inicial.
+        """
         msg = ev.msg
         datapath = msg.datapath
         ofproto = datapath.ofproto
@@ -270,12 +267,7 @@ class SDNFlowMonitor(app_manager.RyuApp):
                 datapath, 1, match, actions,
                 idle_timeout=FLOW_IDLE_TIMEOUT, hard_timeout=FLOW_HARD_TIMEOUT,
             )
-            # El paquete que dispara ESTE PacketIn (y la instalación de la
-            # regla) nunca lo cuenta el propio switch en las estadísticas
-            # de esa regla -la regla no existía todavía cuando llegó-. Lo
-            # apuntamos aquí para sumarlo cuando leamos las stats (ver
-            # _flow_stats_reply_handler), en vez de perderlo como un
-            # falso "0 paquetes / 0 bytes".
+            # Registrar offset para no perder el recuento del primer paquete
             flow_key = self._flow_key(dpid, match_fields.get)
             extra_p, extra_b = self.pending_offsets.get(flow_key, (0, 0))
             self.pending_offsets[flow_key] = (extra_p + 1, extra_b + msg.total_len)
@@ -294,6 +286,7 @@ class SDNFlowMonitor(app_manager.RyuApp):
     # Monitor periódico
     # ---------------------------------------------------------- #
     def _monitor_loop(self):
+        """Consulta periódicamente las estadísticas de flujo a todos los switches activos."""
         while True:
             for dp in list(self.datapaths.values()):
                 self._request_flow_stats(dp)
@@ -302,27 +295,10 @@ class SDNFlowMonitor(app_manager.RyuApp):
     # ---------------------------------------------------------- #
     # Vigilancia de cambios de fase (label) y limpieza de flujos
     # ---------------------------------------------------------- #
-    # PROBLEMA que esto resuelve: OFPFlowStatsRequest devuelve TODOS los
-    # flujos activos en el switch, no solo los que generó la fase actual.
-    # Como una entrada de flujo puede seguir viva hasta FLOW_HARD_TIMEOUT
-    # segundos después de creada, si la fase cambia justo antes de que
-    # expire (p.ej. de "scanning" a "spoofing"), esa fila queda etiquetada
-    # con la fase nueva aunque el tráfico real sea de la fase anterior
-    # ("contaminación" de etiquetas en las fronteras entre fases). Por eso
-    # vaciamos activamente la tabla de flujos en cuanto detectamos que
-    # LABEL_FILE ha cambiado, en vez de esperar a que expiren solas.
-    #
-    # Además, un vaciado disparado SOLO por cambios de etiqueta no basta
-    # para MAX_ROWS_PER_PHASE: el generador solo puede detectar que una
-    # fase se ha pasado de filas DESPUÉS de que el controlador ya las
-    # haya escrito (el CSV solo crece en cada sondeo), y aunque deje de
-    # lanzar tráfico nuevo en cuanto lo detecta, los flujos YA CREADOS
-    # siguen vivos hasta su hard_timeout y se siguen muestreando -sumando
-    # filas de más- mientras tanto. Por eso también se vigila
-    # FLUSH_REQUEST_FILE: el generador puede pedir un vaciado inmediato
-    # en el momento exacto en que detecta el desbordamiento, sin esperar
-    # a que la fase termine y cambie la etiqueta.
     def _label_watch_loop(self):
+        """Vigila cambios de etiqueta o peticiones de purga para vaciar las tablas 
+        de flujo del switch y prevenir la contaminación entre fases.
+        """
         while True:
             current = self._read_current_label()
             flush_request = self._read_flush_request()
@@ -350,6 +326,7 @@ class SDNFlowMonitor(app_manager.RyuApp):
             hub.sleep(0.3)
 
     def _flush_all_flows(self):
+        """Elimina todos los flujos instalados en los switches y reinicia los contadores internos."""
         for dp in list(self.datapaths.values()):
             ofproto = dp.ofproto
             parser = dp.ofproto_parser
@@ -360,44 +337,34 @@ class SDNFlowMonitor(app_manager.RyuApp):
                 match=match, priority=0, instructions=[],
             )
             dp.send_msg(mod)
-            # OFPFC_DELETE con match comodín borra también la regla de
-            # table-miss (prioridad 0); la reinstalamos para seguir
-            # recibiendo PacketIn de los paquetes nuevos de la siguiente fase.
+            # Reinstalar la regla table-miss (eliminada por el match comodín)
             self._install_table_miss(dp)
-        # limpiamos también el histórico de mac_to_port, tasas y offsets
-        # pendientes, para no "arrastrar" contadores/aprendizaje de la
-        # fase anterior
+        # Limpiar registros históricos para evitar arrastrar métricas a la nueva fase
         self.mac_to_port.clear()
         self.prev_stats.clear()
         self.pending_offsets.clear()
 
     def _request_flow_stats(self, datapath):
+        """Envía una petición de estadísticas de flujo (OFPFlowStatsRequest) al switch."""
         parser = datapath.ofproto_parser
         req = parser.OFPFlowStatsRequest(datapath)
         datapath.send_msg(req)
 
     @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
     def _flow_stats_reply_handler(self, ev):
+        """Procesa las estadísticas recibidas, calcula características derivadas (pps/bps),
+        aplica compensaciones de primer paquete y escribe las muestras en el CSV.
+        """
         body = ev.msg.body
         dpid = ev.msg.datapath.id
         label = self._read_current_label()
         now = time.time()
 
-        # La regla de table-miss (prioridad 0, match comodín) es un
-        # contador AGREGADO del switch -cuántos paquetes desconocidos ha
-        # visto en total-, no un flujo/conversación real: no tiene
-        # eth_src/ip_src/etc. propios. La excluimos para no mezclar una
-        # fila "agregada" (con esos campos vacíos) con las de flujos
-        # individuales.
+        # Filtrar la regla de table-miss (prioridad 0) para procesar solo flujos individuales
         flow_stats = [s for s in body if s.priority != 0]
         flow_count = len(flow_stats)
 
-        # --------------------------------------------------------- #
-        # Diagnóstico: si flow_count se dispara, esto nos dice si son
-        # sobre todo flujos ARP o IP, y sobre todo si son "recién
-        # instalados" (duration_sec/nsec muy bajo) -lo que indicaría
-        # que se están reinstalando en cada sondeo en vez de persistir
-        # como una única entrada estable-.
+        # Registro de diagnóstico sobre la composición de los flujos activos
         n_arp = sum(1 for s in flow_stats if s.match.get("eth_type") == ether_types.ETH_TYPE_ARP)
         n_ip = sum(1 for s in flow_stats if s.match.get("eth_type") == ether_types.ETH_TYPE_IP)
         n_fresh = sum(1 for s in flow_stats if s.duration_sec == 0)
@@ -426,8 +393,7 @@ class SDNFlowMonitor(app_manager.RyuApp):
 
             flow_key = self._flow_key(dpid, match.get)
 
-            # Sumamos el paquete "invisible" que instaló esta regla (si lo
-            # hay y todavía no se había consumido en un poll anterior).
+            # Sumar el offset del paquete inicial consumido durante el PacketIn
             extra_p, extra_b = self.pending_offsets.pop(flow_key, (0, 0))
             packet_count = stat.packet_count + extra_p
             byte_count = stat.byte_count + extra_b
@@ -439,17 +405,7 @@ class SDNFlowMonitor(app_manager.RyuApp):
                 pps = max((packet_count - prev_packets) / dt, 0)
                 bps = max((byte_count - prev_bytes) / dt, 0)
             else:
-                # O bien es la primera vez que vemos este flujo, o bien
-                # había una muestra previa pero packet_count es MENOR que
-                # la que teníamos guardada -señal inequívoca de que el
-                # flujo anterior con esta misma clave expiró (idle/hard
-                # timeout) y se ha reinstalado desde cero-. Comparar
-                # contra la muestra vieja daría una resta negativa que se
-                # recortaría a 0 de forma incorrecta (esto explicaba
-                # bastantes de las tasas a 0.0 que no deberían serlo). En
-                # cualquiera de los dos casos usamos la duración propia
-                # que reporta el switch (duration_sec + duration_nsec)
-                # como mejor estimación disponible.
+                # Estimación inicial o recuperación tras expiración/reinstalación de flujo
                 flow_age = stat.duration_sec + stat.duration_nsec / 1e9
                 if flow_age > 0:
                     pps = packet_count / flow_age

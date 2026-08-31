@@ -10,8 +10,8 @@ Lanza TODO el proceso de generación del dataset con un único comando:
   4) Al terminar (o si se interrumpe con Ctrl+C), detiene el controlador
      y limpia el estado residual de Mininet (mn -c).
 
-Debe ejecutarse como root, porque Mininet lo requiere. Los comandos
-exactos (con o sin entorno virtual) están en EJECUCION.md.
+Ejecución:
+    sudo venv/bin/python3 run_all.py (Ver EJECUCION.md).
 """
 import os
 import shutil
@@ -22,10 +22,19 @@ import time
 
 import config
 
+# IMPRESCINDIBLE, no una redundancia: sin esto, "import topology" (más
+# abajo) falla con ModuleNotFoundError. pip install -e . no lo sustituye:
+# setup.py registra mininet_lab como paquete con prefijo
+# (mininet_lab.topology), no como "topology" a secas.
 sys.path.insert(0, config.MININET_LAB_DIR)
 
 
 def wait_for_port(host, port, timeout=30):
+    """
+    Realiza sondeos periódicos mediante sockets TCP para comprobar si un puerto está abierto.
+
+    Retorna True tan pronto como se acepta la conexión, o False si se agota el timeout.
+    """
     start = time.time()
     while time.time() - start < timeout:
         try:
@@ -37,13 +46,17 @@ def wait_for_port(host, port, timeout=30):
 
 
 def resolve_ryu_manager():
-    """Busca ryu-manager primero en el venv del proyecto y si no en el PATH."""
+    """
+    Localiza el ejecutable 'ryu-manager'.
+    Prioriza el entorno virtual (venv) del proyecto y, si no lo encuentra, busca en el PATH global.
+    """
     if os.path.exists(config.VENV_RYU_MANAGER):
         return config.VENV_RYU_MANAGER
     return shutil.which("ryu-manager")
 
 
 def print_log_tail(path, n=25):
+    """Muestra por consola las últimas 'n' líneas del archivo de log especificado."""
     try:
         with open(path) as f:
             lines = f.readlines()
@@ -90,7 +103,7 @@ def main():
             sys.exit(1)
         print("*** Controlador listo. Lanzando la topología Mininet...\n")
 
-        import topology  # mininet_lab/topology.py (import diferido: necesita sys.path ya listo)
+        import topology
         topology.main()
 
     except KeyboardInterrupt:

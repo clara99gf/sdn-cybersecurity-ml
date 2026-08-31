@@ -6,10 +6,10 @@ Levanta una topología en árbol en Mininet, la conecta a un controlador
 Ryu remoto (sdn_monitor.py) y lanza la generación de tráfico intercalado
 para construir el dataset.
 
-Ejecución manual (con el controlador Ryu ya corriendo en otra terminal):
+Ejecución (con el controlador Ryu ya corriendo en otra terminal):
     sudo python3 topology.py
 
-(normalmente no necesitas ejecutar esto directamente: usa run_all.py
+(normalmente no se necesita ejecutar esto directamente: se usa run_all.py
 en la raíz del proyecto, ver EJECUCION.md)
 """
 
@@ -18,6 +18,10 @@ import sys
 import time
 from functools import partial
 
+# Red de seguridad: si por lo que sea "pip install -e ." no está hecho
+# (o el venv se rehízo sin volver a ejecutarlo), esto asegura que
+# "import config" se resuelva igualmente sin depender de la instalación
+# editable ni de la carpeta desde la que se ejecute este script.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 
@@ -42,20 +46,13 @@ def main():
     )
     net.start()
 
-    info("*** Desactivando TSO/GSO/GRO en las interfaces (hosts Y switches: "
-         "cada enlace virtual tiene dos extremos, y si solo se desactiva en "
-         "uno, el 'super-paquete' se puede seguir formando en el otro)...\n")
+    info("*** Desactivando agregación de paquetes (TSO/GSO/GRO) en interfaces...\n")
     for node in net.hosts + net.switches:
         for intf_name in node.intfNames():
             if intf_name != "lo":
+                # Desactiva offloading para evitar super-tramas no realistas
                 node.cmd(f"ethtool -K {intf_name} tso off gso off gro off 2>/dev/null")
-                # Además de apagar tso/gso/gro, se acota explícitamente el
-                # tamaño máximo que el kernel puede agrupar en un solo
-                # "super-paquete" (gso_max_size). En algunos kernels, con
-                # tráfico reenviado por el datapath de Open vSwitch, un
-                # GSO ya generado puede seguir viajando sin trocearse
-                # incluso con gso "off" en las interfaces visibles; fijar
-                # este límite explícito lo evita también en ese caso.
+                # Limita el tamaño de segmento al MTU estándar de Ethernet (1514B)
                 node.cmd(f"ip link set dev {intf_name} gso_max_size 1514 2>/dev/null")
 
     info("*** Esperando a que los switches se conecten al controlador...\n")
