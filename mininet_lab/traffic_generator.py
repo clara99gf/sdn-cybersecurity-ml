@@ -16,13 +16,35 @@ ninguna fase puede generar más de MAX_ROWS_PER_PHASE filas (ver
 config.py), para que TARGET_ROWS se reparta entre muchas fases
 distintas en vez de que una sola acapare el dataset.
 
+AMPLIACIÓN DE VARIEDAD (añadida junto con la subida a 150.000 filas en
+config.py, para aprovechar la misma regeneración sin coste de tiempo
+extra):
+  - scanning: añadido "-p 1-30" (rango algo más ancho que "-p 1-20",
+    sigue acotado) y una sonda ACK suelta vía hping3 (no nmap -ver
+    scanning_traffic()-): un paquete TCP con solo el flag ACK activado,
+    firma de tráfico distinta de un SYN normal o de un handshake
+    completo.
+  - ddos: añadida una intensidad intermedia (~1000pps, entre el
+    "flood" máximo y el "rate_limited" original de ~500pps) y puerto
+    objetivo variable (80/443/22/53, antes siempre 80 -un DDoS real no
+    siempre apunta a HTTP-).
+  - spoofing:ip: puerto objetivo variable (80/443/22, mismo motivo).
+  - normal: añadido un ancho de banda "alto" (5M) en iperf_udp, A
+    PROPÓSITO: sin tráfico legítimo de alta tasa en el dataset, el
+    modelo podría aprender el atajo "tasa alta = ataque", que no
+    generalizaría a una transferencia legítima grande de verdad. Con
+    ambos presentes, tiene que aprender la FORMA del tráfico, no solo
+    el volumen -es una recomendación estándar en la literatura de
+    detección de intrusiones: evitar que el modelo dependa de atajos
+    que no reflejan la naturaleza real del ataque-.
+
 Dependencias de red (instaladas mediante setup.sh a nivel de sistema / venv):
     - Binarios Linux: ping, iperf, nmap, hping3.
     - Librería Python: scapy.
 
 Ejecución:
     Este módulo es coordinado automáticamente por el orquestador principal
-    run_all.py (ver EJECUCION.md).
+    run_01_dataset.py (ver EJECUCION.md).
 """
 
 import os
@@ -116,9 +138,13 @@ def _sleep_with_cap(duration, baseline_rows, phase_name, step=0.3):
 def _start_bg(host, cmd):
     """
     Ejecuta un comando en segundo plano en la shell del host y recupera su PID exacto.
-    Redirige STDOUT y STDERR hacia el archivo de log global.
+    Redirige STDOUT y STDERR hacia el archivo de log global, AÑADIENDO
+    (append, ">>") en vez de sobrescribiendo -bug corregido: con ">" cada
+    llamada borraba todo el log anterior y lo sustituía por la salida de
+    ESE comando concreto, dejando solo lo último que se hubiera lanzado
+    al terminar toda una tirada, en vez del histórico completo-.
     """
-    host.cmd(f"{cmd} > {LOG_FILE} 2>&1 &")
+    host.cmd(f"{cmd} >> {LOG_FILE} 2>&1 &")
     pid = host.cmd("echo $!").strip()
     return pid
 
@@ -205,7 +231,12 @@ def normal_traffic(net, duration):
             h1.cmd(f"iperf -c {h2.IP()} -p 5002 -t {t} >> {LOG_FILE} 2>&1")
 
         else:  # iperf_udp
-            bw = random.choice(["200K", "500K", "1M"])
+            # Incluye un ancho de banda "alto" (5M) a propósito: sin esto,
+            # el modelo podría aprender el atajo "tasa alta = ataque" -que
+            # no generalizaría bien a una transferencia legítima grande de
+            # verdad-. Con tráfico normal de alta tasa también presente,
+            # tiene que aprender la FORMA del ataque, no solo el volumen.
+            bw = random.choice(["200K", "500K", "1M", "5M"])
             if h2.name not in started_udp_servers:
                 h2.cmd(f"iperf -s -u -p 5001 >> {LOG_FILE} 2>&1 &")
                 started_udp_servers.add(h2.name)
@@ -227,10 +258,11 @@ def normal_traffic(net, duration):
 # ------------------------------------------------------------------ #
 def scanning_traffic(net, duration):
     """
-    Simula escaneos de puertos/red con nmap hacia hosts objetivos.
-    Aplica el parámetro -Pn para evitar el descubrimiento de hosts mediante
-    ICMP y utiliza diferentes tipos y velocidades de escaneo de forma
-    aleatoria y secuencial para generar tráfico de scanning controlado.
+    Simula escaneos de puertos/red hacia hosts objetivo, combinando nmap
+    (varias técnicas y velocidades, elegidas al azar) con sondas ACK
+    sueltas vía hping3 -equivalente al escaneo ACK, ver más abajo-.
+    Aplica -Pn en nmap para evitar el descubrimiento de hosts mediante
+    ICMP.
     """
     hosts = net.hosts
     attacker = random.choice(hosts)
@@ -242,14 +274,34 @@ def scanning_traffic(net, duration):
     baseline = _count_csv_rows()
     end_time = time.time() + duration
 
-    scan_types = ["-sS", "-sT", "-sU --top-ports 8", "-p 1-20"]
+    scan_types = [
+        "-sS", "-sT", "-sU --top-ports 8", "-p 1-20", "-p 1-30",
+    ]
     timing = ["-T2", "-T3", "-T4"]  # sin -T5: demasiado explosivo con rangos de puertos
+
+    # Probabilidad de la variante "sonda ACK" frente a nmap: 1 entre 6
+    # (mismo peso relativo que si fuera una entrada más de scan_types,
+    # para no descompensar la mezcla de variantes).
+    ACK_PROBE_PROBABILITY = 1 / 6
 
     while time.time() < end_time and not _cap_exceeded(baseline):
         target = random.choice(targets)
-        flags = f"-Pn {random.choice(scan_types)} {random.choice(timing)}"
-        _log(f"[scanning] {attacker.name} -> {target.IP()} :: nmap {flags}")
-        pid = _start_bg(attacker, f"nmap {flags} {target.IP()}")
+        if random.random() < ACK_PROBE_PROBABILITY:
+            # Sonda ACK suelta vía hping3 (no nmap): un paquete TCP con
+            # SOLO el flag ACK activado, sin conexión previa -firma de
+            # tráfico distinta de un SYN normal (ddos/spoofing) o de un
+            # handshake completo (normal)-. Mismo mecanismo de puerto
+            # origen fijo (-k -s) que ya usamos en ddos/spoofing para
+            # evitar un flujo nuevo por paquete.
+            port = random.randint(1, 30)
+            _log(f"[scanning] {attacker.name} -> {target.IP()} :: hping3 -A -p {port}")
+            pid = _start_bg(
+                attacker, f"hping3 -A -c 1 -k -s 5099 -p {port} {target.IP()}",
+            )
+        else:
+            flags = f"-Pn {random.choice(scan_types)} {random.choice(timing)}"
+            _log(f"[scanning] {attacker.name} -> {target.IP()} :: nmap {flags}")
+            pid = _start_bg(attacker, f"nmap {flags} {target.IP()}")
         cut = _sleep_with_cap(random.uniform(1, 2), baseline, "scanning")
         _kill_pid(attacker, pid)
         if cut:
@@ -258,6 +310,7 @@ def scanning_traffic(net, duration):
     if _cap_exceeded(baseline):
         _request_flush()
     attacker.cmd("pkill -9 -f nmap 2>/dev/null")
+    attacker.cmd("pkill -9 -f hping3 2>/dev/null")
     _settle()
 
 
@@ -297,16 +350,20 @@ def _arp_spoofing(net, duration, baseline):
 def _ip_spoofing(net, duration, baseline):
     """El atacante envía TCP a 'victim' falsificando la IP origen como si
     fuera 'fake_source'.
-    Puerto origen fijo (-k -s) para no generar un flujo nuevo por paquete."""
+    Puerto origen fijo (-k -s) para no generar un flujo nuevo por paquete.
+    Puerto DESTINO variable (antes siempre 80): varios servicios reales
+    detrás de spoofing, no solo HTTP -más variedad, mismo mecanismo de
+    puerto origen fijo que evita la explosión de flujos-."""
     hosts = net.hosts
     attacker = random.choice(hosts)
     others = [h for h in hosts if h != attacker]
     victim, fake_source = random.sample(others, 2)
+    target_port = random.choice([80, 443, 22])
 
-    _log(f"[spoofing:ip] {attacker.name} -> {victim.IP()} con IP falsa {fake_source.IP()}")
+    _log(f"[spoofing:ip] {attacker.name} -> {victim.IP()}:{target_port} con IP falsa {fake_source.IP()}")
     pid = _start_bg(
         attacker,
-        f"hping3 --syn -k -s 5000 -a {fake_source.IP()} -p 80 -i u20000 {victim.IP()}",
+        f"hping3 --syn -k -s 5000 -a {fake_source.IP()} -p {target_port} -i u20000 {victim.IP()}",
     )
     _sleep_with_cap(duration, baseline, "spoofing:ip")
     _kill_pid(attacker, pid)
@@ -333,16 +390,26 @@ def ddos_traffic(net, duration):
     baseline = _count_csv_rows()
 
     flood_type = random.choice(["--syn", "--udp", "--icmp"])
-    intensity = random.choice(["flood", "rate_limited"])
-    rate_flag = "--flood" if intensity == "flood" else "-i u2000"  # ~500 pps si acotado
+    # Tres intensidades en vez de dos: un punto intermedio entre el
+    # "flood" máximo y el "rate_limited" original (~500pps), para que
+    # el espectro de intensidad no sean solo dos extremos.
+    intensity = random.choice(["flood", "rate_limited", "rate_limited_fast"])
+    rate_flag = {
+        "flood": "--flood",
+        "rate_limited": "-i u2000",       # ~500 pps
+        "rate_limited_fast": "-i u1000",  # ~1000 pps
+    }[intensity]
+    # Puerto objetivo variable (antes siempre 80): un DDoS real no
+    # siempre apunta a HTTP -más variedad de servicios objetivo-.
+    target_port = random.choice([80, 443, 22, 53])
 
-    _log(f"[ddos] {[a.name for a in chosen_attackers]} -> {victim.IP()} "
+    _log(f"[ddos] {[a.name for a in chosen_attackers]} -> {victim.IP()}:{target_port} "
          f":: {flood_type} ({intensity})")
     pids = []
     for i, a in enumerate(chosen_attackers):
         port = 5100 + i  # puerto fijo distinto por atacante, pero estable en el tiempo
         pid = _start_bg(
-            a, f"hping3 {flood_type} -k -s {port} {rate_flag} -p 80 {victim.IP()}",
+            a, f"hping3 {flood_type} -k -s {port} {rate_flag} -p {target_port} {victim.IP()}",
         )
         pids.append((a, pid))
 
@@ -368,6 +435,16 @@ def generate_dataset(net, total_duration=None, min_phase=None, max_phase=None, t
     min_phase = min_phase or config.MIN_PHASE_DURATION
     max_phase = max_phase or config.MAX_PHASE_DURATION
     target_rows = config.TARGET_ROWS if target_rows is None else target_rows
+
+    # Empezar cada tirada con el log de tráfico limpio. _log() escribe
+    # con "a" (añadir) a propósito, para no perder nada DENTRO de una
+    # misma tirada -pero eso significa que, sin este borrado, se
+    # acumularía entre tiradas distintas indefinidamente (nos pasó: un
+    # archivo de más de un millón de líneas mezclando varias tiradas).
+    # ryu_controller.log no necesita este mismo tratamiento aquí:
+    # run_01_dataset.py ya lo abre en modo "escribir" (sobrescribe) en
+    # cada ejecución, por su cuenta.
+    open(LOG_FILE, "w").close()
 
     check_required_tools(net)
     _kill_all_attack_tools()  # por si algo sobrevivió a una ejecución anterior

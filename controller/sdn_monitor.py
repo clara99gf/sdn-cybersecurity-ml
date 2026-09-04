@@ -20,7 +20,7 @@ generador de tráfico: solo lee "cuál es la fase actual".
 Ejecución:
     ryu-manager sdn_monitor.py
 
-(normalmente no se necesita ejecutar esto directamente: se usa run_all.py
+(normalmente no se necesita ejecutar esto directamente: se usa run_01_dataset.py
 en la raíz del proyecto, ver EJECUCION.md)
 """
 
@@ -60,6 +60,7 @@ CSV_HEADERS = [
     "ip_src", "ip_dst", "ip_proto",
     "tcp_src_port", "tcp_dst_port",
     "udp_src_port", "udp_dst_port",
+    "tcp_flags",
     "arp_opcode", "arp_spa", "arp_tpa", "arp_sha",
     "duration_sec", "duration_nsec",
     "idle_timeout", "hard_timeout",
@@ -85,6 +86,15 @@ class SDNFlowMonitor(app_manager.RyuApp):
         # Compensación para el primer paquete de un flujo: el paquete que desencadena el 
         # PacketIn no incrementa los contadores del FlowStats devuelto por el switch.
         self.pending_offsets = {}
+        # flow_key -> flags TCP (entero, bitmask) del PRIMER paquete del
+        # flujo -es el único momento en que el controlador ve el paquete
+        # completo, no solo el match agregado del FlowStats-. Señal útil
+        # para distinguir, p.ej., una sonda ACK suelta (solo ACK, nunca
+        # visto como primer paquete de una conexión legítima) de tráfico
+        # normal. No se hace pop() como con pending_offsets: el valor
+        # debe seguir disponible en CADA sondeo mientras el flujo viva,
+        # no solo en el primero.
+        self.pending_tcp_flags = {}
         self._last_label = None
         self._last_flush_request = None
         self._reset_label_file()
@@ -235,6 +245,7 @@ class SDNFlowMonitor(app_manager.RyuApp):
         actions = [parser.OFPActionOutput(out_port)]
 
         match_fields = {"in_port": in_port, "eth_src": src, "eth_dst": dst}
+        tcp_flags = None
 
         ip_pkt = pkt.get_protocol(ipv4.ipv4)
         arp_pkt = pkt.get_protocol(arp.arp)
@@ -250,9 +261,24 @@ class SDNFlowMonitor(app_manager.RyuApp):
             if tcp_pkt:
                 match_fields["tcp_src"] = tcp_pkt.src_port
                 match_fields["tcp_dst"] = tcp_pkt.dst_port
+                tcp_flags = tcp_pkt.bits  # flags del PRIMER paquete (ver pending_tcp_flags)
+                if config.DEBUG_TCP_FLAGS:
+                    self.logger.info(
+                        "[debug-tcp] %s:%s -> %s:%s flags=%d (bin=%s)",
+                        ip_pkt.src, tcp_pkt.src_port, ip_pkt.dst, tcp_pkt.dst_port,
+                        tcp_flags, format(tcp_flags, "08b"),
+                    )
             elif udp_pkt:
                 match_fields["udp_src"] = udp_pkt.src_port
                 match_fields["udp_dst"] = udp_pkt.dst_port
+            elif config.DEBUG_TCP_FLAGS and ip_pkt.proto != 1:
+                # IP pero ni TCP ni UDP reconocidos (y no ICMP, que es
+                # esperado y frecuente) -por si algún paquete se estuviera
+                # viendo como otra cosa inesperada-.
+                self.logger.info(
+                    "[debug-tcp] IP no-TCP/UDP: %s -> %s, ip_proto=%d (paquete no reconocido como tcp_pkt)",
+                    ip_pkt.src, ip_pkt.dst, ip_pkt.proto,
+                )
 
         elif arp_pkt:
             match_fields["eth_type"] = ether_types.ETH_TYPE_ARP
@@ -271,6 +297,8 @@ class SDNFlowMonitor(app_manager.RyuApp):
             flow_key = self._flow_key(dpid, match_fields.get)
             extra_p, extra_b = self.pending_offsets.get(flow_key, (0, 0))
             self.pending_offsets[flow_key] = (extra_p + 1, extra_b + msg.total_len)
+            if tcp_flags is not None:
+                self.pending_tcp_flags[flow_key] = tcp_flags
 
         data = None
         if msg.buffer_id == ofproto.OFP_NO_BUFFER:
@@ -343,6 +371,7 @@ class SDNFlowMonitor(app_manager.RyuApp):
         self.mac_to_port.clear()
         self.prev_stats.clear()
         self.pending_offsets.clear()
+        self.pending_tcp_flags.clear()
 
     def _request_flow_stats(self, datapath):
         """Envía una petición de estadísticas de flujo (OFPFlowStatsRequest) al switch."""
@@ -393,6 +422,15 @@ class SDNFlowMonitor(app_manager.RyuApp):
 
             flow_key = self._flow_key(dpid, match.get)
 
+            # Flags TCP del primer paquete del flujo (guardados en
+            # _packet_in_handler, ver pending_tcp_flags). NO se hace
+            # pop(): debe seguir disponible en cada sondeo mientras el
+            # flujo viva, no solo en el primero. "" si no es TCP (ARP,
+            # ICMP, UDP) o si el flujo ya existía antes de arrancar el
+            # controlador -mismo criterio que el resto de campos "no
+            # aplica" del proyecto-.
+            tcp_flags = self.pending_tcp_flags.get(flow_key, "")
+
             # Sumar el offset del paquete inicial consumido durante el PacketIn
             extra_p, extra_b = self.pending_offsets.pop(flow_key, (0, 0))
             packet_count = stat.packet_count + extra_p
@@ -425,6 +463,7 @@ class SDNFlowMonitor(app_manager.RyuApp):
                 eth_src, eth_dst, eth_type,
                 ip_src, ip_dst, ip_proto,
                 tcp_src, tcp_dst, udp_src, udp_dst,
+                tcp_flags,
                 arp_op, arp_spa, arp_tpa, arp_sha,
                 stat.duration_sec, stat.duration_nsec,
                 stat.idle_timeout, stat.hard_timeout,

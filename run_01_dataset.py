@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-run_all.py
+run_01_dataset.py
 ----------
 Lanza TODO el proceso de generación del dataset con un único comando:
   1) Localiza y arranca el controlador Ryu (controller/sdn_monitor.py)
@@ -11,7 +11,7 @@ Lanza TODO el proceso de generación del dataset con un único comando:
      y limpia el estado residual de Mininet (mn -c).
 
 Ejecución:
-    sudo venv/bin/python3 run_all.py (Ver EJECUCION.md).
+    sudo venv/bin/python3 run_01_dataset.py (Ver EJECUCION.md).
 """
 import os
 import shutil
@@ -117,7 +117,9 @@ def main():
             ryu_proc.kill()
         log_fp.close()
 
-        print("*** Limpiando estado residual de Mininet (mn -c)...")
+        print("*** [run_01_dataset.py] Limpiando estado residual de Mininet "
+              "(mn -c, red de seguridad extra por si algo se saltó la limpieza "
+              "de topology.py)...")
         subprocess.run(["mn", "-c"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         print(f"\n*** Fin.")

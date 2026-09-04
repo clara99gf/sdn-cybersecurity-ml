@@ -9,11 +9,21 @@ para construir el dataset.
 Ejecución (con el controlador Ryu ya corriendo en otra terminal):
     sudo python3 topology.py
 
-(normalmente no se necesita ejecutar esto directamente: se usa run_all.py
+Modo prueba manual (para depurar a mano, con la red y el controlador
+REALES -misma topología, mismos ajustes TSO/GSO/GRO- pero SIN lanzar la
+generación automática de tráfico, dejando la CLI de Mininet libre):
+    sudo SDN_MANUAL_TEST=1 venv/bin/python3 mininet_lab/topology.py
+
+(el orden importa: la variable va DESPUÉS de "sudo", no antes -sudo
+borra el entorno de quien lo llama por defecto, así que "VAR=1 sudo
+..." no funciona, tiene que ser "sudo VAR=1 ..."-.
+
+(normalmente no se necesita ejecutar esto directamente: se usa run_01_dataset.py
 en la raíz del proyecto, ver EJECUCION.md)
 """
 
 import os
+import subprocess
 import sys
 import time
 from functools import partial
@@ -30,6 +40,7 @@ from mininet.node import RemoteController
 from mininet.topolib import TreeTopo
 from mininet.link import TCLink
 from mininet.log import setLogLevel, info
+from mininet.cli import CLI
 
 from traffic_generator import generate_dataset
 
@@ -61,16 +72,32 @@ def main():
     info("*** Comprobando conectividad básica (pingAll)...\n")
     net.pingAll()
 
-    info("*** Iniciando generación del dataset...\n")
-    generate_dataset(
-        net,
-        total_duration=config.TOTAL_DURATION,
-        min_phase=config.MIN_PHASE_DURATION,
-        max_phase=config.MAX_PHASE_DURATION,
-    )
-
-    info("*** Deteniendo la red...\n")
-    net.stop()
+    # try/finally: igual que ya hace run_01_dataset.py -si se interrumpe
+    # con Ctrl+C (frecuente en el modo de prueba manual, CLI incluida) o
+    # falla algo, net.stop() y "mn -c" se ejecutan de todas formas, sin
+    # dejar interfaces de red colgadas para la siguiente vez.
+    try:
+        if os.environ.get("SDN_MANUAL_TEST"):
+            info("*** SDN_MANUAL_TEST activo: entrando en la CLI de Mininet en vez "
+                 "de generar el dataset -red y controlador reales, para probar "
+                 "comandos a mano (p.ej. nmap) en el entorno de verdad-.\n")
+            info("*** Prueba, por ejemplo: h1 nmap -Pn -sS -T4 <IP de h2>\n")
+            CLI(net)
+        else:
+            info("*** Iniciando generación del dataset...\n")
+            generate_dataset(
+                net,
+                total_duration=config.TOTAL_DURATION,
+                min_phase=config.MIN_PHASE_DURATION,
+                max_phase=config.MAX_PHASE_DURATION,
+            )
+    except KeyboardInterrupt:
+        info("\n*** Interrumpido por el usuario.\n")
+    finally:
+        info("*** Deteniendo la red...\n")
+        net.stop()
+        info("*** [topology.py] Limpiando estado residual de Mininet (mn -c)...\n")
+        subprocess.run(["mn", "-c"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 if __name__ == "__main__":

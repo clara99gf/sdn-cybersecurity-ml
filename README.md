@@ -8,15 +8,25 @@ Genera un CSV con características de flujos OpenFlow etiquetadas como
 - **Ejecución**: `EJECUCION.md`
 - **Configuración centralizada**: `config.py`
 
+**Nota sobre `data/dataset_sdn.csv`**: a diferencia de lo habitual (no
+solerlo versionar), este CSV **sí está incluido en el repositorio** a
+propósito -genera tarda varias horas (ver más abajo), y el tribunal del
+TFG no debería tener que regenerarlo para revisar el proyecto-. Los
+artefactos derivados (`data/processed/`, `models/*.pkl`) NO se
+versionan -se regeneran en ~3 minutos con `ml/run_02_ml.py`, y
+`random_forest.pkl` pesa ~245MB sin límite de profundidad, superando
+el límite de 100MB de GitHub-. `results/` (tablas y gráficas) sí se
+versiona -pesa poco y es evidencia directa sin ejecutar nada-.
+
 ## Estructura
 
 ```
 config.py                 # Rutas y parámetros compartidos por todo el proyecto
-run_all.py                 # Lanza controlador + red + generación con un solo comando
+feature_windows.py         # WindowTracker: ventana deslizante temporal, compartida entre ml/ y (futuro) controller/
+run_01_dataset.py                  # Lanza controlador + red + generación con un solo comando
 setup.py                    # Instalación editable del proyecto (pip install -e .)
 setup.sh                     # Instala dependencias de sistema, crea el venv y ejecuta setup.py
-requirements.txt              # Dependencias Python (dentro del venv): ryu, scapy
-data/                          # CSV del dataset generado (data/dataset_sdn.csv)
+data/                          # CSV del dataset generado (data/dataset_sdn.csv) y data/processed/ (ver ml/)
 logs/                           # Logs del controlador y de la generación de tráfico
 runtime/                         # Estado efímero compartido (etiqueta de fase activa)
 controller/
@@ -27,7 +37,24 @@ mininet_lab/
   topology.py                   # Levanta la topología y lanza la generación
   traffic_generator.py          # Orquesta las fases de tráfico intercaladas
   arp_spoof.py                   # Script de spoofing ARP (usado por traffic_generator)
+ml/
+  __init__.py
+  utils.py                       # Persistencia de datos/artefactos (data/processed/, models/)
+  preprocessing.py               # Limpieza, codificación, selección de características
+  train.py                       # Entrena Logistic Regression, Decision Tree, Random Forest
+  evaluate.py                    # Métricas, matrices de confusión, coste computacional
+  run_02_ml.py                    # Orquestador: preprocessing -> train -> evaluate en un comando
+models/                         # Modelos y artefactos entrenados (.pkl) -generado, no versionado-
+results/
+  figures/                       # Gráficas (comparativa de métricas, matrices de confusión...)
+  tables/                        # Tablas en CSV (métricas, coste computacional)
 ```
+
+> Nota: las dependencias Python (`ryu`, `scapy` para la generación;
+> `scikit-learn`, `pandas`, `matplotlib`, `joblib` para `ml/`) están
+> declaradas en `setup.py` (`install_requires`), no en un
+> `requirements.txt` aparte -una sola fuente de dependencias-.
+
 
 > Nota: `data/`, `logs/` y `runtime/` guardan su contenido fuera de
 > `/tmp` a propósito. Si ejecutas todo con `sudo`, algunos sistemas
@@ -48,7 +75,7 @@ forma que `import config`, `from controller import sdn_monitor`, etc.
 funcionan de forma nativa desde cualquier sitio -incluido un notebook
 de preprocesado/entrenamiento fuera de este árbol de carpetas- sin
 depender de la carpeta desde la que ejecutes algo. No es
-imprescindible para que `run_all.py` funcione (cada script ya se
+imprescindible para que `run_01_dataset.py` funcione (cada script ya se
 resuelve solo con un pequeño `sys.path.insert()` como red de
 seguridad), pero es la forma "correcta" de reutilizar `config.py`
 -por ejemplo, para leer `CSV_FILE` o `LABEL_FILE`- desde fuera del
@@ -415,16 +442,16 @@ usado y su `sys.path` completo -así no hace falta reproducirlo a mano
 para ver por qué falla-.
 
 `setup.sh` ahora también comprueba esto **con sudo** en el propio
-paso 5 (las mismas condiciones en las que corre `run_all.py`, no las
+paso 5 (las mismas condiciones en las que corre `run_01_dataset.py`, no las
 de tu shell normal) y, si falla, reinstala scapy dentro del venv
 automáticamente. Si `./setup.sh` ya lo dio por OK pero el aviso sigue
-saliendo, prueba exactamente el comando que usa `run_all.py`:
+saliendo, prueba exactamente el comando que usa `run_01_dataset.py`:
 ```bash
 sudo env PYTHONNOUSERSITE=1 venv/bin/python3 -c "import sys; print(sys.executable); print(sys.path); import scapy"
 ```
 y pega el error si lo hay.
 
-Si el controlador Ryu no llega a escuchar en el puerto, `run_all.py`
+Si el controlador Ryu no llega a escuchar en el puerto, `run_01_dataset.py`
 ya te muestra automáticamente las últimas líneas de
 `logs/ryu_controller.log` en la terminal; revisa ahí el motivo real
 del fallo (típicamente: `ryu-manager` no instalado en el venv, o
@@ -551,9 +578,239 @@ puedes compensarlo en el preprocesado (`class_weight` en el modelo,
 sobremuestreo tipo SMOTE en la clase minoritaria, o submuestreo de la
 mayoritaria) en vez de perseguir el balance perfecto en la generación.
 
-## Después de generar el CSV
+## Preprocesado, entrenamiento y evaluación (`ml/`)
 
-Como ya planeas, aplica el preprocesado (eliminar filas nulas o
-incompletas —p. ej. flujos ARP sin campos IP—, normalizar tipos
-numéricos, posiblemente balancear clases si alguna fase generó muchas
-más filas que otras) antes de entrenar el modelo.
+Con el CSV ya generado, `ml/` contiene el pipeline completo para
+entrenar y comparar Logistic Regression, Decision Tree y Random
+Forest. Se ejecuta con el mismo `venv/` (sus dependencias —
+`scikit-learn`, `pandas`, `numpy`, `matplotlib`, `joblib` — están
+declaradas en `setup.py` junto a las de la generación), pero **sin
+`sudo`**: trabaja sobre un CSV estático, no toca Mininet.
+
+```bash
+venv/bin/python3 ml/run_02_ml.py
+```
+
+(o paso a paso: `ml/preprocessing.py`, `ml/train.py`, `ml/evaluate.py`
+por separado, si quieres depurar cada fase por su cuenta)
+
+### `ml/preprocessing.py`
+
+1. **Características de ventana temporal** (ver más abajo).
+2. **Quita las filas `warmup`** (no representan ninguna de las 4
+   clases a clasificar).
+3. **Quita duplicados.**
+4. **Elimina identificadores rígidos**: `timestamp`, IPs, MACs y
+   `dpid` -con solo 16 hosts y 5 switches en el laboratorio, el
+   modelo podría memorizar qué IP/MAC concreta aparece en qué clase
+   en vez de aprender patrones de tráfico generalizables-.
+5. **Elimina columnas constantes** (`idle_timeout`/`hard_timeout`):
+   mismo valor en TODAS las filas del dataset -comprobado, no
+   asumido-, cero información posible.
+6. **Filtra nulos/infinitos de las métricas derivadas**
+   (`packet_count_per_second`, `byte_count_per_second`,
+   `avg_packet_size`). Distinto del NaN *estructural* de puertos/ARP
+   (un flujo UDP no tiene `tcp_dst_port`) -eso no es un dato perdido,
+   se rellena con 0 en vez de eliminar la fila-.
+7. **Codificación numérica de categóricas** (`eth_type`, `ip_proto`,
+   `arp_opcode`) con `LabelEncoder`.
+8. **Reconstruye a qué FASE pertenece cada fila** (`groups`, ver
+   siguiente apartado) -imprescindible para evaluar bien-.
+
+Guarda en `data/processed/` el dataset completo ya limpio (`X.csv`,
+`y.npy`, `groups.npy`) y en `models/` los artefactos de codificación
+(`le_y.pkl`, `encoders.pkl`). **Ya NO hace el split train/test, ni
+escala, ni selecciona características aquí** -motivo explicado abajo-.
+
+**El balanceo de clases NO se hace aquí.** Nada de sobremuestreo ni
+submuestreo. Se resuelve en `ml/train.py` con `class_weight="balanced"`
+en los tres modelos: una solución algorítmica integrada en
+scikit-learn, no una manipulación de los datos.
+
+### Por qué el split train/test cambió de "aleatorio por fila" a "por fase completa" (GroupKFold)
+
+Un ataque concreto (una "fase" de `traffic_generator.py`) dura
+10-25s, y el controlador muestrea la tabla de flujos cada 2s mientras
+está activo -así que ESE MISMO ataque genera varias filas en el CSV,
+todas muy parecidas entre sí (mismo atacante, misma víctima, mismo
+tipo de ataque, segundos de diferencia-.
+
+Con un split aleatorio por fila (`train_test_split` de toda la vida),
+filas "gemelas" de la MISMA fase podían acabar repartidas entre train
+y test. El modelo no estaba aprendiendo a reconocer un ataque de un
+tipo dado en general -estaba parcialmente memorizando fragmentos de
+ataques concretos que ya había visto en parte durante el
+entrenamiento, y luego se "examinaba" con fragmentos casi idénticos
+del mismo ataque-. Eso infla el F1 medido de forma artificial: no mide
+qué tan bien generalizaría el modelo a un ataque **nuevo**, mide qué
+tan bien reconoce fragmentos de ataques que, en la práctica, ya vio.
+
+**Comprobado empíricamente, no solo en teoría**: con split aleatorio
+por fila, el F1 (macro) de Random Forest salía en **0.777**. Split
+por fase completa (ninguna fase repartida entre train y test):
+**~0.46**. La diferencia es demasiado grande para ignorarla.
+
+Un único split por fase (un solo 80/20), además, es muy inestable:
+probado con 5 semillas distintas, el F1 osciló entre 0.38 y 0.60 según
+qué fases en concreto caían en el test -pocas fases (159 reconstruidas
+en este dataset) hacen que un solo split dependa mucho del azar-. Por
+eso se usa **`GroupKFold`** (5 particiones) en vez de un único split:
+se promedia el resultado de varias particiones distintas, dando una
+estimación más estable Y sin la fuga de información entre fases.
+
+**Consecuencia práctica en el código**: el escalado (`StandardScaler`)
+y la selección de características por importancia (Random Forest) ya
+NO se hacen una vez en `preprocessing.py` -eso volvería a filtrar
+información entre fases de train y test, por la puerta de atrás-. Se
+hacen DENTRO de cada fold de la validación cruzada, en
+`ml/evaluate.py`, ajustados solo con los datos de entrenamiento de
+ESE fold.
+
+**¿Y por qué no bajar directamente el F1 a 0.46 y ya está?** Porque
+ese número concreto es poco fiable por sí solo (mucha variedad entre
+folds: ±0.086 de desviación típica) y porque el split aleatorio por
+fila, aunque optimista, no es una práctica inventada por nosotros -es
+la más habitual en la literatura de detección de intrusiones con ML
+(incluso con datasets de referencia como NSL-KDD o CICIDS2017)-. Lo
+correcto es reportar la validación cruzada agrupada como medida
+principal y honesta de generalización (que es lo que hace ahora el
+pipeline), documentando claramente el porqué -que es precisamente lo
+que se ha hecho aquí-.
+
+**Qué ayudaría a que el modelo generalizase mejor a variantes de
+ataque nuevas** (probado, no solo intuido): regularizar el modelo
+(limitar la profundidad de los árboles) apenas cambia nada
+(0.458 → 0.462 de F1 en una prueba con Random Forest) -no es un
+problema de sobreajuste a ruido que se arregle con hiperparámetros-.
+Lo que sí ayudaría de verdad es tener **más fases distintas de cada
+tipo de ataque** (más episodios, no solo más filas dentro de los
+mismos episodios) y **más variedad de parámetros** dentro de cada
+tipo (más combinaciones de flags de `nmap`/`hping3`, no solo
+repeticiones de las mismas variantes) -ambas cosas requieren volver a
+generar el dataset con más duración/variedad, una decisión de tiempo
+que queda fuera del alcance de esta fase-.
+
+### `tcp_flags` (nueva, en `sdn_monitor.py`, no en `ml/`)
+
+**Nota histórica**: `_start_bg` escribía en `logs/traffic_generator.log`
+con `>` (sobrescribir) en vez de `>>` (añadir) -bug ya corregido-, lo
+que borraba todo el historial de la tirada cada vez que se lanzaba un
+comando en segundo plano. Corregido a `>>`, y además `generate_dataset()`
+(en `traffic_generator.py`) vacía `logs/traffic_generator.log` al
+empezar cada tirada automáticamente -no hace falta borrarlo a mano-,
+para que el log de cada tirada quede aislado y no se mezcle con el de
+tiradas anteriores. (`logs/ryu_controller.log` ya se sobrescribía solo
+desde el principio, vía `run_01_dataset.py`.)
+
+A diferencia de las features de ventana temporal (calculadas offline
+en `preprocessing.py` sobre el CSV ya generado), esta se captura en
+**el propio generador**: `_packet_in_handler` ve el paquete completo
+del PRIMER paquete de cada flujo nuevo (antes de instalar la regla),
+algo que ya recibía pero del que solo se aprovechaban IPs/puertos. Se
+guarda `tcp_pkt.bits` (flags SYN/ACK/FIN/RST/...) en un diccionario
+nuevo (`pending_tcp_flags`, mismo patrón que `pending_offsets`) y se
+escribe en el CSV en cada sondeo mientras el flujo viva.
+
+Por qué en el generador y no en preprocessing (a diferencia de las
+features de ventana): esta información NO EXISTE en el CSV actual -no
+es un cálculo derivable de columnas ya guardadas, hace falta capturarla
+en el momento en que el controlador ve el paquete real-. Requiere
+regenerar el dataset para tener efecto.
+
+Motivación: una sonda ACK suelta (ver más abajo, en `scanning`) manda
+un paquete ACK sin conexión previa como primer paquete de un flujo
+-algo que una conexión legítima o un SYN scan prácticamente nunca
+hacen-. Es una señal estructural nueva, no otra variante de las que ya
+había.
+
+`tcp_flags` se trata como categórica (`LabelEncoder`, combinaciones de
+bits concretas son categorías distintas, no una escala) y como NaN
+estructural (vacío en flujos ARP/UDP/ICMP, mismo criterio que
+`tcp_src_port`).
+
+Confirmado con pruebas reales (5.000-30.000 filas): SYN y RST+ACK se
+capturan con normalidad y dan señal real para distinguir `scanning`,
+algo que antes no existía.
+
+### Características de ventana temporal
+
+Además de las columnas propias de cada fila, se calculan 4
+características de *patrón entre flujos* con una ventana deslizante de
+5s hacia atrás (nunca mira al futuro, sin fuga de información):
+`distinct_ports_by_src_5s` (puertos distintos tocados por el mismo
+origen -escaneo de puertos-), `distinct_targets_by_src_5s` (destinos
+distintos tocados por el mismo origen -escaneo de red-),
+`flows_to_target_5s` (flujos hacia el mismo destino) y
+`distinct_sources_to_target_5s` (orígenes distintos hacia el mismo
+destino -DDoS distribuido-). Usan `ip_src`/`ip_dst`/`timestamp` solo
+como cálculo intermedio -se descartan después como siempre-.
+
+Se calculan con `feature_windows.WindowTracker` (raíz del proyecto),
+un módulo **compartido**: aquí se usa en modo lote, y la misma clase
+se reutilizará sin cambios cuando se aborde la fase de detección en
+vivo, alimentada evento a evento desde `sdn_monitor.py` -evitando
+*training-serving skew*-. Se calculan en `preprocessing.py`
+("offline") y no en el generador SDN porque no hace falta regenerar
+el dataset de Mininet/Ryu para iterar sobre esto.
+
+**Pendiente para cuando se conecte a `sdn_monitor.py`**: alimentar
+`WindowTracker` con la MISMA granularidad de evento que usa el CSV de
+entrenamiento (una llamada por sondeo del controlador, no por
+paquete) -ver detalle en el propio código de `preprocessing.py`-.
+
+Impacto medido con la metodología de evaluación correcta
+(`GroupKFold`, comprobado, no estimado): sin estas 4 características,
+Random Forest da F1 = 0.4225 ± 0.074; con ellas, sube a 0.4661 ± 0.086.
+Una mejora real (+0.044) que se mantiene bajo la evaluación honesta
+-más modesta que la mejora que parecía haber bajo el split aleatorio
+por fila (que llegaba a sugerir +0.05), pero genuina-.
+
+### `ml/train.py`
+
+Ajusta el pipeline **final desplegable** (escalado + selección de
+características + modelo) sobre **todo** el dataset disponible -no
+sobre un 80%-. Este script no mide rendimiento (eso lo hace
+`evaluate.py` con `GroupKFold`); solo produce el modelo que se
+guardaría para usar de verdad, y para eso conviene aprovechar todos
+los datos históricos disponibles, no reservarse un 20% sin usar.
+`class_weight="balanced"` en los tres modelos, midiendo el tiempo de
+entrenamiento de cada uno (para la tabla de coste computacional).
+
+### `ml/evaluate.py`
+
+Evalúa con `GroupKFold` (5 particiones, agrupadas por fase) y genera:
+
+1. **Tabla + gráfico de barras** con Accuracy/Precision/Recall/F1
+   (media entre folds, más la desviación típica del F1 entre folds)
+   (`results/tables/metrics_comparison.csv`,
+   `results/figures/metrics_comparison.png`). Mejor modelo por F1
+   medio, guardado como `models/best_model.pkl`.
+2. **Matrices de confusión**: un PNG por modelo, construidas con las
+   predicciones *out-of-fold* (cada fila predicha exactamente una vez,
+   por un modelo que nunca vio su propia fase durante el
+   entrenamiento) (`results/figures/confusion_matrix_<modelo>.png`).
+3. **Tabla de coste computacional**: tiempo de entrenamiento del
+   modelo final (de `train.py`, sobre todo el dataset) y tiempo de
+   inferencia por flujo en ms (medido aquí, promediado entre folds)
+   (`results/tables/computational_cost.csv`).
+
+Precision/Recall/F1 con promedio **macro** (todas las clases pesan
+igual) -coherente con `class_weight="balanced"`-.
+
+### Resultado con el dataset real (30.097 filas → 28.360 tras limpiar, 158 fases)
+
+| Modelo | Accuracy | F1 (macro, media GroupKFold) | Desv. típica F1 | Entrenamiento | Inferencia |
+|---|---|---|---|---|---|
+| Logistic Regression | 0.399 | 0.382 | ±0.054 | 0.19s | 0.0003 ms/flujo |
+| Decision Tree | 0.442 | 0.418 | ±0.069 | 0.18s | 0.0004 ms/flujo |
+| **Random Forest** | **0.489** | **0.466** | ±0.086 | 6.65s | 0.033 ms/flujo |
+
+Random Forest sigue siendo el mejor de los tres, aunque con un margen
+más ajustado sobre Decision Tree que con la evaluación anterior (0.466
+frente a 0.418, no 0.777 frente a 0.729). Esto es esperable y
+coherente: la evaluación agrupada mide algo más difícil (generalizar a
+fases enteras nunca vistas), así que las diferencias entre modelos se
+comprimen un poco. La desviación típica entre folds (0.054-0.086)
+también es un dato honesto a incluir en la memoria: refleja cuánto
+varía el rendimiento según qué fases en concreto se usan para
+entrenar, no un número inventado.

@@ -52,12 +52,21 @@ export PYTHONNOUSERSITE=1
 ./venv/bin/pip install -e .
 
 echo
+echo "=== 3b. Forzando numpy/scipy/scikit-learn compatibles dentro del venv ==="
+# Mismo problema que con scapy (paso 4): --system-site-packages puede
+# hacer que se "vea" un scipy del SISTEMA compilado para una versión de
+# numpy distinta a la que hay activa -incompatibilidad binaria entre
+# ellos, no un fallo del proyecto-. Forzamos que las tres vengan del
+# propio venv, resueltas juntas y compatibles entre sí.
+./venv/bin/pip install --force-reinstall --no-deps "numpy<2" scipy scikit-learn
+
+echo
 echo "=== 4. Verificando dependencias tal y como se ejecutarán de verdad (con sudo) ==="
 if sudo env PYTHONNOUSERSITE=1 ./venv/bin/python3 -c "import scapy" 2>/dev/null; then
     echo "OK: scapy es visible ejecutando con sudo."
 else
     echo "AVISO: scapy NO es visible ejecutando con sudo (así es como corre"
-    echo "run_all.py). Forzando reinstalación dentro del propio venv..."
+    echo "run_01_dataset.py). Forzando reinstalación dentro del propio venv..."
     ./venv/bin/pip install --force-reinstall --no-deps --ignore-installed scapy
     if sudo env PYTHONNOUSERSITE=1 ./venv/bin/python3 -c "import scapy" 2>/dev/null; then
         echo "OK: solucionado."

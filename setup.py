@@ -17,15 +17,24 @@ setup(
     version="1.0.0",
     description=(
         "Generacion de dataset de trafico SDN (normal/scanning/spoofing/ddos) "
-        "con Mininet y Ryu, para deteccion de amenazas con Machine Learning."
+        "con Mininet y Ryu, mas preprocesado/entrenamiento/evaluacion de "
+        "modelos de Machine Learning (Logistic Regression, Decision Tree, "
+        "Random Forest) para deteccion de amenazas."
     ),
     py_modules=["config"],
     packages=find_packages(
-        include=["controller", "controller.*", "mininet_lab", "mininet_lab.*"]
+        include=["controller", "controller.*", "mininet_lab", "mininet_lab.*", "ml", "ml.*"]
     ),
     install_requires=[
+        # Generación del dataset (Mininet/Ryu)
         "ryu",
         "scapy",
+        # Preprocesado / entrenamiento / evaluación (ml/)
+        "scikit-learn",
+        "pandas",
+        "numpy",
+        "matplotlib",
+        "joblib",
     ],
     python_requires=">=3.7",
 )

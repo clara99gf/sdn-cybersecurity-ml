@@ -7,13 +7,24 @@ __pycache__/
 *.pyo
 *.egg-info/
 
-# Dataset y logs generados (se mantienen las carpetas, no el contenido)
-data/*
-!data/.gitkeep
+# Dataset generado: SÍ se sube a git a propósito (~4-5h de generación,
+# el tribunal del TFG no debería tener que regenerarlo para revisar el
+# proyecto). data/processed/ NO se sube -se regenera en segundos con
+# ml/preprocessing.py, no aporta nada tenerlo versionado-.
+data/processed/*
+!data/processed/.gitkeep
 logs/*
 !logs/.gitkeep
 runtime/*
 !runtime/.gitkeep
+
+# Modelos: NO se suben. Se regeneran en ~3 min con ml/run_02_ml.py, y
+# random_forest.pkl pesa ~245MB sin límite de profundidad -supera el
+# límite de 100MB de GitHub-. results/ (tablas y gráficas, evidencia
+# directa para el tribunal) SÍ se sube -pesa poco y no requiere
+# ejecutar nada para verlo-.
+models/*
+!models/.gitkeep
 
 # Mininet
 *.pcap
