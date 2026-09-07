@@ -49,6 +49,14 @@ for _d in (DATA_DIR, LOGS_DIR, RUNTIME_DIR):
 
 LABEL_FILE = os.path.join(RUNTIME_DIR, "current_label.txt")
 FLUSH_REQUEST_FILE = os.path.join(RUNTIME_DIR, "flush_request.txt")
+# Parejas IP/MAC reales de cada host, escritas por topology.py justo
+# tras levantar la red (con host.IP()/host.MAC(), la propia API de
+# Mininet -no una convención adivinada-) y leídas por el controlador al
+# arrancar, para "sembrar" ip_to_mac con la verdad de referencia desde
+# el principio -en vez de tener que "aprenderla" del primer paquete que
+# llegue, lo cual falla si ese primer paquete es ya un ataque de
+# spoofing de ARP-. Formato: una línea por host, "ip,mac".
+HOST_IDENTITY_FILE = os.path.join(RUNTIME_DIR, "host_identities.csv")
 CSV_FILE = os.path.join(DATA_DIR, "dataset_sdn.csv")
 RYU_LOG_FILE = os.path.join(LOGS_DIR, "ryu_controller.log")
 TRAFFIC_LOG_FILE = os.path.join(LOGS_DIR, "traffic_generator.log")
@@ -59,8 +67,21 @@ TRAFFIC_LOG_FILE = os.path.join(LOGS_DIR, "traffic_generator.log")
 RYU_CONTROLLER_IP = "127.0.0.1"
 RYU_CONTROLLER_PORT = 6653
 
-POLL_INTERVAL = 2           # Intervalo entre solicitudes de estadísticas de flujo al switch (segundos)
-FLOW_IDLE_TIMEOUT = 3       # Tiempo de inactividad tras el cual se elimina un flujo (segundos)
+# Intervalo entre solicitudes de estadísticas de flujo al switch (segundos).
+# Bajado de 2s a 1s a propósito: el sondeo periódico solo "ve" un flujo
+# si le pregunta al switch mientras ese flujo sigue instalado. Los
+# flujos CORTOS (una sonda de escaneo suelta, un paquete de spoofing)
+# viven poco, así que con sondeos cada 2s se perdían a menudo -y son
+# justo la firma que distingue cada ataque, mientras que el tráfico de
+# fondo (ARP/ICMP, más duradero) sí se capturaba siempre, diluyendo la
+# señal-. A 1s, cada flujo tiene el doble de oportunidades de ser
+# capturado. Coste: más carga en el controlador y más filas por fase.
+POLL_INTERVAL = 1
+# Tiempo de inactividad tras el cual se elimina un flujo (segundos).
+# Subido de 3s a 5s por el mismo motivo, atacando el problema desde el
+# otro lado: si el flujo sobrevive más tiempo en el switch, hay más
+# margen para que algún sondeo lo capture antes de que desaparezca.
+FLOW_IDLE_TIMEOUT = 5
 FLOW_HARD_TIMEOUT = 10      # Tiempo máximo de permanencia de un flujo en el switch (segundos)
 
 # --------------------------------------------------------------- #
@@ -76,22 +97,41 @@ LINK_BANDWIDTH_MBPS = 10
 # Generación de tráfico
 # --------------------------------------------------------------- #
 # Número objetivo de filas del dataset
-# TARGET_ROWS = 150000
-TARGET_ROWS = 30000  # <- tamaño usado en tiradas de prueba previas
+# NOTA: en modo prueba (30000) para validar el efecto de POLL_INTERVAL=1
+# y las sondas ACK más largas antes de la tirada final. Con el sondeo al
+# doble de frecuencia, 30000 filas tardan ~34 min (antes ~68).
+# Número objetivo de filas del dataset.
+# 300.000 (subido desde 150.000) tras comprobar con la curva de
+# aprendizaje que MÁS FASES siguen mejorando el modelo: pasar de 230 a
+# 345 fases dio +0.035 de F1, sin señal de aplanamiento -antes de
+# corregir el etiquetado por flujo la curva sí se aplanaba, por eso
+# entonces no compensaba-. Con ~325 filas/fase de media, 300.000 filas
+# dan ~920 fases (el doble que ahora).
+TARGET_ROWS = 300000
+# TARGET_ROWS = 30000  # <- tamaño para tiradas de prueba rápidas
 
-# Duración máxima de la generación de tráfico (segundos). Techo de
-# SEGURIDAD, no la duración esperada -TARGET_ROWS es el criterio de
-# parada real-. Con 150000 filas, la duración real esperada ronda las
-# ~5.7h; este techo deja un margen sobre esa estimación.
-# TOTAL_DURATION = 22200
-TOTAL_DURATION = 4442  # <- techo correspondiente a la tirada de prueba de 30000
+# Duración máxima de la generación (segundos). Es un techo de SEGURIDAD
+# para que no se quede corriendo indefinidamente si algo va mal, NO la
+# duración esperada -TARGET_ROWS es el criterio de parada real-.
+# Recalculado con el ritmo REAL medido en la última tirada: 150.029
+# filas en 8.771s = 17,1 filas/s. Para 300.000 filas eso son ~4,9h;
+# este techo (6,6h) deja un 35% de margen.
+TOTAL_DURATION = 23700
+# Para tiradas de prueba de 30.000 filas: ~3000s es suficiente.
+# TOTAL_DURATION = 3000
 
 # Duración mínima y máxima de cada fase de tráfico (segundos)
 MIN_PHASE_DURATION = 10         
 MAX_PHASE_DURATION = 25
 
-# Límite de filas que puede aportar UNA SOLA fase
-MAX_ROWS_PER_PHASE = 1500
+# Límite de filas que puede aportar UNA SOLA fase.
+# 500 (bajado desde 800): con POLL_INTERVAL=1s cada fase genera muchas
+# más filas, y con el techo más alto una tirada de 150.000 se agotaba en
+# solo ~400 fases -pocas para GroupKFold, que gana fiabilidad cuantos
+# más grupos independientes tenga-. Con 500 se esperan ~600-700 fases
+# para el mismo volumen, sin perder la mejora de captura del sondeo
+# rápido.
+MAX_ROWS_PER_PHASE = 500
 
 # Tiempo de espera entre fases para permitir que finalice el tráfico anterior (segundos)
 PHASE_SETTLE_SECONDS = 1.5
@@ -108,7 +148,13 @@ RESET_DATASET_ON_START = True
 # para tener siempre un único data/dataset_sdn.csv.
 ARCHIVE_PREVIOUS_DATASET = False
 
-# Indica si las filas generadas durante la fase inicial de calentamiento se almacenan
+# Indica si las filas generadas durante la fase inicial de calentamiento
+# se almacenan. Se mantiene en True (preprocessing.py las descarta
+# igualmente al preparar el dataset, y tenerlas en el CSV crudo permite
+# revisar el arranque si algo va mal). NOTA: con POLL_INTERVAL=1s el
+# warmup genera bastantes más filas que antes (~7000 de 30000 en una
+# tirada de prueba, frente a ~1800 con POLL=2s) -no afecta al modelo,
+# pero infla el CSV crudo; si molesta, ponerlo en False-.
 WRITE_WARMUP_ROWS = True
 
 # Interruptor de depuración: registra en logs/ryu_controller.log cada
@@ -137,8 +183,15 @@ RANDOM_STATE = 42
 TEST_SIZE = 0.2
 
 # Nº de características a conservar tras la selección por importancia
-# (Random Forest). Ajustable: si con menos/más apenas cambia el F1,
-# muévelo con confianza.
+# (Random Forest), dentro de cada fold.
+#
+# PENDIENTE DE REVALIDAR: el valor 15 se fijó hace tiempo, cuando el
+# dataset tenía más columnas y la evaluación aún usaba split aleatorio
+# (con fuga de información). Ahora solo hay 21 características, así que
+# el recorte descarta 6 -y una medición sin recorte dio un F1 algo más
+# alto-. Merece la pena comparar 15 frente a 21 ejecutando
+# `ml/evaluate.py` con cada valor (~2,5 min cada uno) y quedarse con el
+# mejor, en vez de arrastrar un número heredado.
 N_FEATURES = 15
 
 TARGET_COLUMN = "label"
@@ -155,6 +208,11 @@ ID_COLUMNS = [
     "eth_src", "eth_dst",
     "arp_spa", "arp_tpa", "arp_sha",
     "dpid",
+    # phase_id: identificador de fase para GroupKFold. NUNCA debe entrar
+    # como característica -sería una fuga de información masiva (el
+    # modelo aprendería "la fase 37 es scanning" en vez de a reconocer
+    # tráfico)-. Se usa solo para agrupar en la validación cruzada.
+    "phase_id",
 ]
 
 # Constantes de configuración (no del tráfico): mismo valor en TODAS
@@ -178,6 +236,14 @@ STRUCTURAL_NA_COLUMNS = [
     "ip_proto", "tcp_src_port", "tcp_dst_port",
     "udp_src_port", "udp_dst_port", "arp_opcode",
     "tcp_flags",  # "" si el flujo no es TCP (ARP/ICMP/UDP), mismo criterio
+    "ip_mac_consistent",  # "" solo si el flujo ya existía antes de
+                           # arrancar el controlador (caso raro) -no es
+                           # ideal que se rellene con 0 (mismo valor que
+                           # "inconsistente"), pero es un caso marginal
+                           # y mantiene el mismo criterio que el resto
+                           # de columnas "no aplica" del proyecto.
+    "arp_unsolicited_reply",  # "" en todo lo que no sea una respuesta
+                               # ARP (la inmensa mayoría de filas)
 ]
 
 # Columnas de tasas: si aquí aparece un infinito o NaN real (no

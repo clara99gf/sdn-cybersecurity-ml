@@ -85,9 +85,14 @@ from sklearn.preprocessing import LabelEncoder
 from ml.utils import save_artifact, save_full_dataset
 
 # Ventana temporal (segundos) para las características de patrón entre
-# flujos. 5s es del orden de POLL_INTERVAL (2s) y FLOW_IDLE_TIMEOUT
-# (3s) del generador -mucho más corta apenas vería más de 1 flujo;
-# mucho más larga empieza a mezclar fases distintas del generador-.
+# flujos. Se mantiene en 5s tras subir la frecuencia de sondeo
+# (POLL_INTERVAL 2s -> 1s) y FLOW_IDLE_TIMEOUT (3s -> 5s): la ventana
+# mide TIEMPO REAL, no número de sondeos, así que "5 segundos de
+# actividad reciente" sigue significando lo mismo -lo que cambia es que
+# ahora esos 5s contienen más filas, es decir, MÁS información sobre el
+# mismo intervalo, que es justo lo que se buscaba-. Sigue siendo del
+# orden de FLOW_IDLE_TIMEOUT (5s) y muy por debajo de la duración
+# mínima de fase (10s), así que no mezcla fases distintas.
 WINDOW_SECONDS = 5
 
 # Interruptor para poder reproducir la comparación "con vs. sin
@@ -108,15 +113,25 @@ def add_temporal_window_features(df: pd.DataFrame, window_s: int = WINDOW_SECOND
     -sin fuga de información-):
 
       - distinct_ports_by_src_{w}s: nº de puertos destino distintos
-        tocados por el mismo origen -alto en escaneo de puertos-.
+        tocados por el mismo origen -alto en escaneo de puertos-. Solo
+        cuenta filas con puerto REAL: las filas sin puerto (ARP/ICMP,
+        el 87% de scanning) heredan el último valor de su origen, en
+        vez de contaminar el contador con el relleno -1 (bug real: al
+        ser -1 un valor único, el contador salía siempre 1 incluso en
+        pleno escaneo).
       - distinct_targets_by_src_{w}s: nº de destinos distintos tocados
         por el mismo origen -alto en escaneo de red (cambia de host
         objetivo, no solo de puerto)-.
-      - flows_to_target_{w}s: nº de flujos hacia el mismo destino
-        -alto cuando un objetivo recibe mucho tráfico-.
+      - flows_to_target_{w}s: nº de flujos hacia el mismo destino Y
+        MISMO PUERTO (mismo servicio concreto, no toda la IP) -alto
+        cuando un objetivo/servicio recibe mucho tráfico-.
       - distinct_sources_to_target_{w}s: nº de orígenes distintos que
-        han apuntado al mismo destino -alto en DDoS distribuido
-        (muchos atacantes, una víctima)-.
+        han apuntado al mismo destino Y MISMO PUERTO -alto en DDoS
+        distribuido (muchos atacantes, un servicio). Contar por
+        (destino, puerto) y no solo destino evita que tráfico NO
+        relacionado hacia la misma IP en otro puerto (coincidencia de
+        host reutilizado en otra fase) infle el contador como si
+        fueran atacantes reales convergiendo-.
 
     Usa WindowTracker (ver feature_windows.py), la MISMA clase que se
     reutilizará en la futura fase de detección en vivo -aquí se
@@ -145,18 +160,46 @@ def add_temporal_window_features(df: pd.DataFrame, window_s: int = WINDOW_SECOND
 
     src_port_tracker = WindowTracker(window_s)   # clave: origen  -> valor: puerto destino
     src_dst_tracker = WindowTracker(window_s)    # clave: origen  -> valor: destino
-    dst_src_tracker = WindowTracker(window_s)    # clave: destino -> valor: origen
+    # clave: (destino, puerto) -> valor: origen. Con clave = destino A
+    # SECAS (como estaba antes), cualquier tráfico NO relacionado hacia
+    # la misma IP en OTRO puerto (de otra fase distinta, coincidencia
+    # de host reutilizado) infla el contador igual que si fueran
+    # atacantes reales convergiendo -diluye justo la señal que debería
+    # distinguir DDoS (varios orígenes, MISMO servicio) de tráfico
+    # normal-. Con (destino, puerto), solo cuenta tráfico hacia el
+    # mismo servicio concreto.
+    dst_src_tracker = WindowTracker(window_s)
 
     n = len(df)
     distinct_ports = np.zeros(n, dtype=int)
     distinct_targets = np.zeros(n, dtype=int)
     flows_to_target = np.zeros(n, dtype=int)
     distinct_sources = np.zeros(n, dtype=int)
+    # Último recuento de puertos distintos visto por origen, para que
+    # las filas sin puerto (ARP/ICMP) hereden el contexto de su origen
+    # en vez de romper la señal (ver comentario en el bucle).
+    last_ports_by_src = {}
 
     for i in range(n):
-        _, distinct_ports[i] = src_port_tracker.add(src_ids[i], dst_ports[i], ts[i])
+        # Solo alimentar el contador de puertos si la fila TIENE puerto
+        # real. El 87% de las filas de scanning son ARP/ICMP (sin
+        # puerto) y recibían el relleno -1: al ser -1 un valor único,
+        # el contador de "puertos distintos" salía siempre 1, incluso
+        # en pleno escaneo de 30 puertos -la feature no medía nada-.
+        # Confirmado con datos: media 1.09 en scanning, igual que en
+        # normal (1.12), e importancia casi nula en el modelo (0.009).
+        # Ignorando las filas sin puerto, el contador refleja solo
+        # puertos reales tocados por ese origen -que es lo que
+        # distingue un escaneo de puertos-. Las filas sin puerto
+        # arrastran el último valor conocido de su origen (0 si aún no
+        # hay ninguno), en vez de resetearlo a 1 artificialmente.
+        if dst_ports[i] >= 0:
+            _, distinct_ports[i] = src_port_tracker.add(src_ids[i], dst_ports[i], ts[i])
+            last_ports_by_src[src_ids[i]] = distinct_ports[i]
+        else:
+            distinct_ports[i] = last_ports_by_src.get(src_ids[i], 0)
         _, distinct_targets[i] = src_dst_tracker.add(src_ids[i], dst_ids[i], ts[i])
-        total, n_distinct_src = dst_src_tracker.add(dst_ids[i], src_ids[i], ts[i])
+        total, n_distinct_src = dst_src_tracker.add((dst_ids[i], dst_ports[i]), src_ids[i], ts[i])
         flows_to_target[i] = total
         distinct_sources[i] = n_distinct_src
 
@@ -234,20 +277,39 @@ def clean_nulls_and_infinites(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def reconstruct_phase_groups(df: pd.DataFrame) -> np.ndarray:
-    """Reconstruye a qué "fase" (episodio de tráfico) pertenece cada fila,
-    a partir de los cambios de la propia etiqueta en orden temporal -cada
-    vez que traffic_generator.py llama a set_label() empieza una fase
-    nueva, así que un cambio de label = una fase nueva-.
+    """Devuelve a qué "fase" (episodio de tráfico) pertenece cada fila.
 
-    Necesario para evaluar con GroupKFold (ver evaluate.py): las filas de
-    una MISMA fase están muy correladas entre sí (mismo atacante, misma
-    víctima, segundos de diferencia) -si el split de train/test las
+    Usa la columna `phase_id` que escribe el controlador -un contador
+    incremental que traffic_generator.py aumenta en cada set_label()-.
+
+    Antes esto se DEDUCÍA de los cambios de etiqueta, y tenía un fallo
+    real: como el generador elige el tipo de fase al azar, salen a menudo
+    varias fases SEGUIDAS DEL MISMO TIPO (en una tirada real, hasta 7
+    fases de scanning consecutivas), y todas se fusionaban en un único
+    grupo enorme -menos grupos, mucho más desiguales, y una evaluación
+    GroupKFold bastante menos fiable-.
+
+    Es necesario para evaluar con GroupKFold (ver evaluate.py): las filas
+    de una MISMA fase están muy correladas entre sí (mismo atacante,
+    misma víctima, segundos de diferencia) -si el split de train/test las
     reparte al azar entre las dos, el modelo puede "reconocer" en test
     fragmentos casi idénticos de un ataque que ya vio en train, inflando
     el F1 de forma artificial sin medir generalización real a un ataque
     nuevo-. Agrupando por fase y sin repartir ninguna entre train y test,
     se evita ese problema.
+
+    Compatibilidad: si el CSV es de una tirada ANTIGUA (sin columna
+    `phase_id`), se recurre al método anterior por cambios de etiqueta,
+    avisando de que los grupos serán menos precisos.
     """
+    if "phase_id" in df.columns:
+        df = df.sort_values("timestamp") if not df["timestamp"].is_monotonic_increasing else df
+        return df["phase_id"].to_numpy()
+
+    print("[preprocessing] AVISO: el CSV no tiene columna 'phase_id' (tirada "
+          "antigua). Reconstruyendo fases por cambios de etiqueta -fases "
+          "consecutivas del mismo tipo se fusionarán, dando menos grupos y "
+          "una evaluación menos fiable. Regenera el dataset para evitarlo.")
     df = df.sort_values("timestamp") if not df["timestamp"].is_monotonic_increasing else df
     return (df[config.TARGET_COLUMN] != df[config.TARGET_COLUMN].shift()).cumsum().to_numpy()
 

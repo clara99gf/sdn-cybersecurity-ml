@@ -116,3 +116,34 @@ siempre visible con tu usuario normal aunque ejecutes con `sudo`:
 sudo mn -c
 sudo pkill -f ryu-manager
 ```
+
+## Fase 3 — Detección y mitigación en vivo
+
+Requiere haber generado el dataset y entrenado el modelo antes (los
+artefactos de `models/` deben existir: `best_model.pkl` o
+`random_forest.pkl`, `scaler.pkl`, `selected_features.pkl`,
+`encoders.pkl`, `le_y.pkl`).
+
+```bash
+sudo venv/bin/python3 run_03_defense.py
+```
+
+Abre un menú interactivo que levanta el controlador de defensa
+(`controller/sdn_defense.py`) y la red Mininet, y permite:
+
+- Lanzar tráfico de un solo tipo (normal / scanning / ddos / spoofing)
+  y ver cómo se detecta y mitiga en vivo.
+- Lanzar la batería completa (los 4 tipos en secuencia) y generar todas
+  las gráficas al final.
+- Generar las gráficas con las métricas ya recogidas.
+- Salir limpiando el entorno (ejecuta `mn -c`).
+
+El controlador clasifica cada flujo en vivo con el modelo entrenado
+(reproduciendo el mismo preprocesado vía `controller/live_classifier.py`)
+y, si lo clasifica como ataque, inyecta una regla OpenFlow de prioridad
+alta con acción DROP. Las métricas (predicción, tiempo de inferencia,
+latencia del plano de control, CPU de Ryu, momentos de mitigación) se
+guardan en `metrics/defense_events.csv`, y las gráficas en
+`results/figures/defense/`.
+
+Limpieza si algo se queda colgado: `sudo mn -c && sudo pkill -f ryu-manager`.

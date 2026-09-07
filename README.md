@@ -22,33 +22,55 @@ versiona -pesa poco y es evidencia directa sin ejecutar nada-.
 
 ```
 config.py                 # Rutas y parámetros compartidos por todo el proyecto
-feature_windows.py         # WindowTracker: ventana deslizante temporal, compartida entre ml/ y (futuro) controller/
-run_01_dataset.py                  # Lanza controlador + red + generación con un solo comando
+feature_windows.py         # WindowTracker: ventana deslizante temporal, compartida entre ml/ y controller/
+run_01_dataset.py                  # FASE 1: lanza controlador + red + generación del dataset
+run_02_ml.py -> ml/run_02_ml.py    # FASE 2: preprocesado + entrenamiento + evaluación (ver ml/)
+run_03_defense.py                  # FASE 3: menú interactivo de detección y mitigación en vivo
 setup.py                    # Instalación editable del proyecto (pip install -e .)
 setup.sh                     # Instala dependencias de sistema, crea el venv y ejecuta setup.py
 data/                          # CSV del dataset generado (data/dataset_sdn.csv) y data/processed/ (ver ml/)
 logs/                           # Logs del controlador y de la generación de tráfico
-runtime/                         # Estado efímero compartido (etiqueta de fase activa)
+runtime/                         # Estado efímero compartido (etiqueta de fase activa, identidades de host)
+metrics/                         # FASE 3: CSV de eventos de detección/mitigación (defense_events.csv)
 controller/
   __init__.py
-  sdn_monitor.py               # App Ryu: switch L2 + monitor periódico -> CSV
+  sdn_monitor.py               # FASE 1: App Ryu que observa y escribe el CSV etiquetado (dataset)
+  sdn_defense.py               # FASE 3: App Ryu que clasifica en vivo y mitiga (inyecta reglas DROP)
+  live_classifier.py           # FASE 3: reproduce el preprocesado del entrenamiento flujo a flujo en vivo
 mininet_lab/
   __init__.py
-  topology.py                   # Levanta la topología y lanza la generación
-  traffic_generator.py          # Orquesta las fases de tráfico intercaladas
-  arp_spoof.py                   # Script de spoofing ARP (usado por traffic_generator)
+  topology.py                   # Levanta la topología y lanza la generación (fase 1)
+  traffic_generator.py          # FASE 1: orquesta las fases de tráfico intercaladas del dataset
+  arp_spoof.py                   # Script de spoofing ARP multi-víctima (usado en fases 1 y 3)
 ml/
   __init__.py
   utils.py                       # Persistencia de datos/artefactos (data/processed/, models/)
-  preprocessing.py               # Limpieza, codificación, selección de características
-  train.py                       # Entrena Logistic Regression, Decision Tree, Random Forest
-  evaluate.py                    # Métricas, matrices de confusión, coste computacional
-  run_02_ml.py                    # Orquestador: preprocessing -> train -> evaluate en un comando
+  preprocessing.py               # FASE 2: limpieza, features de ventana, codificación
+  train.py                       # FASE 2: entrena Logistic Regression, Decision Tree, Random Forest
+  evaluate.py                    # FASE 2: métricas, matrices de confusión, coste computacional
+  run_02_ml.py                    # FASE 2: orquestador preprocessing -> train -> evaluate
+defense/
+  __init__.py
+  traffic.py                     # FASE 3: generadores de tráfico PURO (normal/ddos/scanning/spoofing)
+  plots.py                       # FASE 3: gráficas (pkt/s, puertos únicos, CPU vs latencia, inferencia...)
 models/                         # Modelos y artefactos entrenados (.pkl) -generado, no versionado-
 results/
-  figures/                       # Gráficas (comparativa de métricas, matrices de confusión...)
+  figures/                       # Gráficas de la fase 2 (comparativa de métricas, matrices de confusión)
+  figures/defense/               # Gráficas de la fase 3 (detección y mitigación)
   tables/                        # Tablas en CSV (métricas, coste computacional)
 ```
+
+### Qué archivo pertenece a cada fase
+
+- **Fase 1 (generación del dataset)**: `run_01_dataset.py`,
+  `controller/sdn_monitor.py`, `mininet_lab/` (`topology.py`,
+  `traffic_generator.py`, `arp_spoof.py`).
+- **Fase 2 (ML)**: `ml/` (`preprocessing.py`, `train.py`,
+  `evaluate.py`, `run_02_ml.py`, `utils.py`).
+- **Fase 3 (detección y mitigación)**: `run_03_defense.py`,
+  `controller/sdn_defense.py`, `controller/live_classifier.py`,
+  `defense/` (`traffic.py`, `plots.py`).
+- **Compartido por todas**: `config.py`, `feature_windows.py`.
 
 > Nota: las dependencias Python (`ryu`, `scapy` para la generación;
 > `scikit-learn`, `pandas`, `matplotlib`, `joblib` para `ml/`) están
@@ -728,9 +750,176 @@ bits concretas son categorías distintas, no una escala) y como NaN
 estructural (vacío en flujos ARP/UDP/ICMP, mismo criterio que
 `tcp_src_port`).
 
-Confirmado con pruebas reales (5.000-30.000 filas): SYN y RST+ACK se
-capturan con normalidad y dan señal real para distinguir `scanning`,
-algo que antes no existía.
+Confirmado con pruebas reales (30.000 filas): SYN, RST+ACK, y la sonda
+ACK vía `hping3` se capturan con normalidad -298 ACK puros y 357 RST
+solos (la respuesta típica del kernel a un ACK sin conexión previa) en
+esa tirada-, dando señal real para distinguir `scanning` que antes no
+existía.
+
+### `ip_mac_consistent` (nueva, en `sdn_monitor.py`, no en `ml/`)
+
+A diferencia de todas las features anteriores (basadas en contar/medir
+tráfico), esta es **estructural**: comprueba, contra el estado que el
+propio controlador ya mantiene en vivo (no un cálculo derivado), si la
+IP declarada de un paquete coincide con la MAC que se vio la PRIMERA
+vez para esa IP (`self.ip_to_mac`, que nunca se sobrescribe a
+propósito -aceptar la última afirmación en vez de la primera es
+justo el fallo que un ataque de spoofing intenta explotar-).
+
+Es la misma lógica que usan los mecanismos anti-spoofing reales
+(ingress filtering / uRPF): no es una estadística de "¿esto parece
+sospechoso?", es una comprobación de consistencia con la topología que
+responde sí/no con certeza. Se aplica tanto a paquetes IP (`ip_pkt.src`
+vs `eth_src`) como a paquetes ARP (`arp_pkt.src_ip` vs
+`arp_pkt.src_mac`, el campo que el spoofing de ARP manipula
+directamente).
+
+Por qué esto debería transferir bien a la futura detección en vivo,
+mejor que las features de ventana temporal: `ip_to_mac` no es un
+cálculo "reconstruido" a partir del CSV -es el mismo estado en vivo
+(`mac_to_port` ya sigue un patrón parecido, para la conmutación L2)
+que usaría el controlador en producción-. Mismo código, mismo estado,
+tanto para generar el dataset como para detectar en vivo más adelante.
+
+`ip_to_mac` NO se limpia en los vaciados de tablas entre fases
+(`_flush_all_flows`) a propósito -es identidad de host, estable durante
+toda la tirada, a diferencia de `mac_to_port`, que sí es estado de
+conmutación transitorio y se limpia con normalidad-.
+
+Confirmado con pruebas reales (30.000 filas): 99.8% de las
+inconsistencias detectadas en todo el dataset caen en `spoofing` -señal
+muy limpia-. Desglosado por tipo de tráfico dentro de spoofing:
+- Paquetes TCP (el ataque de spoofing de IP real, `hping3 --syn`):
+  53.3% de inconsistencia detectada.
+- Paquetes ARP (el spoofing de ARP en sí): 27% -más bajo, con una
+  explicación concreta: el diseño aprende la MAC real de una IP la
+  PRIMERA vez que la ve (a propósito, para no fiarse de una
+  reclamación posterior) -pero si el propio ataque de ARP ocurre antes
+  de que el controlador haya visto esa IP alguna vez, aprende por error
+  la MAC falsa como si fuera la verdadera, y no detecta nada después
+  para esa IP concreta. Limitación conocida y entendida, no un bug-.
+- Paquetes ICMP (ruido de warmup, no el ataque en sí): 0% -normal,
+  diluye la cifra si se mira "spoofing" en conjunto sin desglosar-.
+
+Implementado (tras reconsiderarlo -el techo de mejora en ARP no era
+pequeño, no debería haberlo descartado tan rápido-): `topology.py`
+escribe las parejas IP/MAC REALES de cada host (con `host.IP()`/
+`host.MAC()`, la propia API de Mininet, sin adivinar ninguna
+convención) a `HOST_IDENTITY_FILE` justo tras el `pingAll()`. El
+controlador las carga de forma diferida -no en `__init__`, arranca
+antes de que ese archivo exista- la primera vez que puede, en
+`_packet_in_handler` vía `_try_load_host_identities()`. Comparación de
+MAC insensible a mayúsculas/minúsculas por seguridad. Pendiente de
+probar en Mininet real y de re-medir la tasa de detección en ARP
+-debería subir bastante desde el 27% actual, ya que elimina la causa
+raíz (aprender la MAC falsa como si fuera la real la primera vez que
+se ve una IP)-.
+
+Impacto en F1 medido en una tirada de 30.000 concreta: el F1 bajó
+respecto a una tirada anterior sin esta feature (0.666 -> 0.592) -pero
+descartado que sea por selección de características (probado sin
+recorte de columnas, mismo resultado). La explicación más plausible es
+variabilidad normal entre dos generaciones de dataset distintas, no un
+perjuicio real de la feature -pendiente de confirmar con la tirada de
+150.000, donde el ruido entre fases se promedia mucho mejor-.
+
+### `arp_unsolicited_reply` (nueva, en `sdn_monitor.py`)
+
+Firma clásica del envenenamiento de caché ARP: una **respuesta ARP que
+nadie pidió** ("ARP gratuito"). En funcionamiento normal, una respuesta
+ARP (`is-at`) solo aparece después de que alguien haya preguntado por
+esa IP; el ataque consiste precisamente en mandar respuestas no
+solicitadas para que las víctimas actualicen su tabla con una MAC
+falsa.
+
+El controlador anota en `recent_arp_requests` cada petición ARP que ve
+(IP consultada -> instante), y al llegar una respuesta comprueba si
+había una petición reciente por esa IP (`ARP_REQUEST_TTL = 5s`).
+Valores: `0` = respuesta solicitada (normal), `1` = no solicitada
+(indicio de spoofing), vacío = el flujo no es una respuesta ARP.
+
+Motivación medida sobre datos reales (300.000 filas): `spoofing` tiene
+un **84% de respuestas ARP** frente al 49-59% de las demás clases, así
+que el desequilibrio ya era visible; esta característica lo hace
+explícito en vez de dejar que el modelo lo deduzca de `arp_opcode`.
+
+**Honestidad sobre la señal**: el ARP gratuito también existe de forma
+legítima (un host anunciando su IP/MAC al arrancar), así que por sí
+sola no prueba un ataque -es un indicio que el modelo combina con el
+resto-.
+
+**Impacto real medido (30.000 filas, con vs. sin la característica,
+mismos folds)**: F1 0.8011 -> 0.8055 (+0.004) y recall de spoofing
+prácticamente igual (79.1% -> 78.8%). La señal es limpia (el 87.7% de
+las respuestas no solicitadas caen en `spoofing`), pero **aporta poco
+porque es en gran medida redundante**: el 88.4% de esas respuestas ya
+las detectaba `ip_mac_consistent` -cuando alguien falsifica una
+respuesta ARP, normalmente también hay incoherencia IP/MAC-. Solo el
+11.6% es información nueva.
+
+Se mantiene porque no perjudica y cubre ese 11.6%, pero conviene tener
+claro que **la limitación de spoofing no era la falta de esta señal**,
+sino lo ya documentado: genera pocos flujos capturables y
+estructuralmente se parece al tráfico normal.
+
+### Etiquetado POR FLUJO (el cambio que más mejoró el modelo)
+
+Durante mucho tiempo el etiquetado era **por ventana de tiempo**: todo
+el tráfico que ocurriera durante una fase de ataque recibía la etiqueta
+de esa fase. El problema, medido sobre datos reales: un escaneo lo
+lanza UN host, pero en esas fases aparecían de media **12 hosts origen
+distintos** -es decir, la mayoría de las filas eran tráfico legítimo de
+fondo con etiqueta de ataque-. Se le estaba pidiendo al modelo que
+clasificara como "ataque" tráfico idéntico al normal, porque ERA
+normal.
+
+Solución: `traffic_generator.py` pasa al controlador los ACTORES de
+cada ataque (atacante, víctima, identidad suplantada) vía
+`set_label(label, actors=...)`, y `sdn_monitor.py` etiqueta como ataque
+solo los flujos que los involucran (`_label_for_flow`); el resto se
+etiqueta `normal`, que es lo que realmente es. Es el criterio estándar
+en datasets de detección de intrusiones (CICIDS y similares etiquetan
+por pareja origen/destino del ataque, no por franja horaria).
+
+**Impacto medido (150.000 filas, GroupKFold, Random Forest):
+F1 0.601 -> 0.738**, con mejora en las cuatro clases (spoofing pasó de
+44.7% a 57.4% de recall). Es, con diferencia, el cambio que más ha
+aportado de todo el proyecto.
+
+Efecto secundario esperado: la clase `normal` crece bastante (recoge
+todo el tráfico de fondo que antes se contaba como ataque). No es un
+problema: `class_weight="balanced"` lo compensa en los tres modelos.
+
+### Investigación: 71% de "scanning" es tráfico ARP, no las sondas en sí
+
+Al auditar por qué `normal` y `scanning` se confundían tanto entre sí
+en el modelo, se encontró que el 71% de las filas de `scanning` (y 43%
+de `normal`) son tráfico ARP -resolución de red, no el ataque/actividad
+en sí-, diluyendo la señal útil.
+
+**Primera hipótesis (descartada con datos)**: la caché ARP del kernel
+caduca (≈30s) antes de que termine una fase larga, así que la
+resolución se repite ya con la etiqueta de ataque puesta. Se probó
+alargarla a 120s vía `sysctl` -primero sobre `net.ipv4.neigh.default.*`
+(sin efecto, por aplicarse solo a interfaces NUEVAS, no a las que ya
+existían), luego corregido a cada interfaz concreta (`net.ipv4.neigh.
+{intf}.*`) -confirmado con `sysctl` a mano que SÍ se aplicaba
+(120000)-. Aun así, el porcentaje de ARP en scanning no bajó (71%
+antes y después). Teoría descartada.
+
+**Explicación real (más consistente con lo que ya sabíamos)**: no es
+que haya MÁS tráfico ARP, es que hay MENOS señal real capturada -las
+sondas de escaneo, ya sabíamos, son flujos muy cortos que a menudo se
+pierden entre un sondeo del controlador y el siguiente (mismo
+problema de CAPTURA que ya identificamos con las sondas de spoofing).
+Con un denominador (filas reales de escaneo) pequeño y un ARP de fondo
+más o menos constante, el PORCENTAJE de ARP sube aunque su cantidad
+absoluta no cambie. Es la misma limitación de sondeo periódico ya
+documentada y aceptada como límite conocido del proyecto -no
+solucionable sin rediseñar cómo se sondean los flujos, un cambio de
+mucho más riesgo del que compensa en esta fase-. El cambio de
+`sysctl` se revirtió (no soluciona nada, y dejar código sin efecto
+solo añade confusión).
 
 ### Características de ventana temporal
 

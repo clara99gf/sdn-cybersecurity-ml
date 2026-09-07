@@ -52,6 +52,12 @@ FLUSH_REQUEST_FILE = config.FLUSH_REQUEST_FILE
 CSV_FILE = config.CSV_FILE
 POLL_INTERVAL = config.POLL_INTERVAL
 FLOW_IDLE_TIMEOUT = config.FLOW_IDLE_TIMEOUT
+# Margen para considerar que una respuesta ARP contesta a una petición
+# previa. Una resolución ARP legítima responde en milisegundos; 5s da
+# margen de sobra para retrasos de la red emulada sin llegar a tapar un
+# ARP gratuito (que no tiene NINGUNA petición previa, ni reciente ni
+# antigua). Ver self.recent_arp_requests.
+ARP_REQUEST_TTL = 5.0
 FLOW_HARD_TIMEOUT = config.FLOW_HARD_TIMEOUT
 
 CSV_HEADERS = [
@@ -61,6 +67,8 @@ CSV_HEADERS = [
     "tcp_src_port", "tcp_dst_port",
     "udp_src_port", "udp_dst_port",
     "tcp_flags",
+    "ip_mac_consistent",
+    "arp_unsolicited_reply",
     "arp_opcode", "arp_spa", "arp_tpa", "arp_sha",
     "duration_sec", "duration_nsec",
     "idle_timeout", "hard_timeout",
@@ -68,6 +76,7 @@ CSV_HEADERS = [
     "packet_count_per_second", "byte_count_per_second",
     "avg_packet_size",
     "flow_count_per_dpid",
+    "phase_id",
     "label",
 ]
 
@@ -95,6 +104,44 @@ class SDNFlowMonitor(app_manager.RyuApp):
         # debe seguir disponible en CADA sondeo mientras el flujo viva,
         # no solo en el primero.
         self.pending_tcp_flags = {}
+        # ip -> mac, la PRIMERA vez que se vio esa IP -nunca se
+        # sobrescribe a propósito, ni siquiera si llega un valor
+        # distinto después (eso sería justo lo que un ataque de
+        # spoofing intenta conseguir: que confiemos en la última
+        # afirmación, no en la primera). Es la "verdad" de referencia
+        # para detectar spoofing: comprobar si la MAC declarada de una
+        # IP coincide con la que se vio la primera vez. NO se limpia en
+        # los vaciados de tablas (_flush_all_flows) a propósito -a
+        # diferencia de mac_to_port, que es estado de conmutación
+        # transitorio, esto es identidad de host, que no cambia durante
+        # toda la tirada-.
+        self.ip_to_mac = {}
+        # Se intenta cargar de forma diferida (no en __init__): el
+        # controlador arranca ANTES que topology.py escriba
+        # HOST_IDENTITY_FILE (el archivo no existe todavía en este
+        # punto). Ver _try_load_host_identities().
+        self._host_identities_loaded = False
+        # flow_key -> 1 (consistente) / 0 (inconsistente, posible
+        # spoofing), calculado en el momento del packet_in contra
+        # ip_to_mac. Mismo patrón que pending_tcp_flags: no se hace
+        # pop(), debe seguir disponible en cada sondeo mientras el
+        # flujo viva.
+        self.pending_ip_mac_consistent = {}
+        # IP consultada -> instante de la última PETICIÓN ARP por esa IP.
+        # Sirve para detectar RESPUESTAS ARP NO SOLICITADAS ("ARP
+        # gratuito"): en el funcionamiento normal, una respuesta ARP
+        # ("is-at") solo aparece después de que alguien haya preguntado
+        # por esa IP. El envenenamiento de caché ARP consiste justo en
+        # mandar respuestas que NADIE pidió, para que las víctimas
+        # actualicen su tabla con una MAC falsa -es el heurístico
+        # estándar de detección de ARP spoofing-.
+        # Confirmado en los datos: spoofing tiene un 84% de respuestas
+        # ARP frente al 49-59% de las demás clases.
+        self.recent_arp_requests = {}
+        # flow_key -> 1 (respuesta no solicitada) / 0 (solicitada).
+        # Mismo patrón que pending_tcp_flags: sin pop(), debe seguir
+        # disponible en cada sondeo mientras el flujo viva.
+        self.pending_arp_unsolicited = {}
         self._last_label = None
         self._last_flush_request = None
         self._reset_label_file()
@@ -131,7 +178,7 @@ class SDNFlowMonitor(app_manager.RyuApp):
         """
         try:
             with open(LABEL_FILE, "w") as f:
-                f.write("warmup")
+                f.write("warmup,0")
         except OSError:
             pass
 
@@ -154,11 +201,59 @@ class SDNFlowMonitor(app_manager.RyuApp):
             self.csv_fp.flush()
 
     def _read_current_label(self):
+        """Devuelve (label, phase_id, actores) de la fase actual.
+
+        LABEL_FILE tiene el formato "label,phase_id,ip1|ip2|..." -el id y
+        los actores los escribe set_label() en el generador-. El id permite
+        distinguir fases CONSECUTIVAS DEL MISMO TIPO (que si no se
+        fusionarían en un solo grupo para GroupKFold); los actores
+        permiten etiquetar como ataque SOLO los flujos implicados, en vez
+        de todo el tráfico que coincida en el tiempo (ver
+        _label_for_flow). Se aceptan los formatos antiguos (solo "label",
+        o "label,phase_id") por compatibilidad.
+        """
         try:
             with open(LABEL_FILE, "r") as f:
-                return f.read().strip() or "normal"
+                raw = f.read().strip()
         except FileNotFoundError:
-            return "normal"
+            return "normal", "0", frozenset()
+        if not raw:
+            return "normal", "0", frozenset()
+        parts = raw.split(",")
+        label = parts[0].strip() or "normal"
+        phase_id = parts[1].strip() if len(parts) > 1 and parts[1].strip() else "0"
+        actors = frozenset(
+            ip for ip in (parts[2].split("|") if len(parts) > 2 else []) if ip
+        )
+        return label, phase_id, actors
+
+    @staticmethod
+    def _label_for_flow(phase_label, actors, ip_src, ip_dst, arp_spa, arp_tpa):
+        """Etiqueta de UNA fila concreta dentro de una fase de ataque.
+
+        Devuelve la etiqueta del ataque solo si el flujo involucra a algún
+        actor del ataque (atacante, víctima o identidad suplantada);
+        "normal" en caso contrario.
+
+        Motivo: antes se etiquetaba TODO el tráfico que ocurriera durante
+        una fase de ataque con la etiqueta de esa fase -pero un escaneo lo
+        lanza UN host, y en esas fases aparecen ~12 hosts origen distintos:
+        la mayoría de filas eran tráfico legítimo de fondo con etiqueta de
+        ataque-. Esas etiquetas erróneas eran ruido puro e impedían separar
+        las clases: medido sobre datos reales, corregirlo sube el F1 de
+        0.60 a 0.70 sin tocar nada más. Es además el criterio estándar en
+        datasets de detección de intrusiones (CICIDS y similares etiquetan
+        por pareja origen/destino del ataque, no por franja horaria).
+
+        Si no hay actores (fase "normal", o CSV/generador antiguo sin ese
+        dato), se conserva la etiqueta de la fase tal cual.
+        """
+        if not actors or phase_label in ("normal", "warmup"):
+            return phase_label
+        for ip in (ip_src, ip_dst, arp_spa, arp_tpa):
+            if ip and ip in actors:
+                return phase_label
+        return "normal"
 
     # ---------------------------------------------------------- #
     # Gestión de datapaths (switches conectados)
@@ -198,6 +293,104 @@ class SDNFlowMonitor(app_manager.RyuApp):
         )
         datapath.send_msg(mod)
 
+    def _try_load_host_identities(self):
+        """Carga (una sola vez, en cuanto esté disponible) las parejas
+        IP/MAC reales de los hosts desde HOST_IDENTITY_FILE -escrito por
+        topology.py tras levantar la red, con host.IP()/host.MAC()-.
+
+        Se llama al principio de _packet_in_handler porque el
+        controlador arranca ANTES que topology.py escriba el archivo
+        -no se puede hacer en __init__, el archivo no existiría
+        todavía-. Una vez cargado (self._host_identities_loaded=True),
+        no vuelve a intentarlo -es barato comprobar el flag, no hace
+        falta más-.
+        """
+        if self._host_identities_loaded:
+            return
+        if not os.path.exists(config.HOST_IDENTITY_FILE):
+            return
+        try:
+            with open(config.HOST_IDENTITY_FILE) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    ip, mac = line.split(",")
+                    self.ip_to_mac[ip] = mac.lower()
+            self._host_identities_loaded = True
+            self.logger.info(
+                "[+] Identidades de host cargadas desde %s (%d hosts) -para "
+                "detección de spoofing con verdad de referencia desde el "
+                "arranque-", config.HOST_IDENTITY_FILE, len(self.ip_to_mac),
+            )
+        except Exception as e:
+            # No crítico: si falla, ip_to_mac se sigue "aprendiendo" del
+            # primer paquete que llegue -el comportamiento previo, sin
+            # la mejora, pero sin romper nada-.
+            self.logger.warning(
+                "No se pudieron cargar identidades de host desde %s: %s",
+                config.HOST_IDENTITY_FILE, e,
+            )
+
+    def _check_arp_solicited(self, arp_pkt):
+        """Para paquetes ARP, distingue respuestas SOLICITADAS de las que no.
+
+        Devuelve:
+          - None  si es una PETICIÓN (no aplica; además la registra para
+            poder comprobar las respuestas que lleguen después).
+          - 0     si es una respuesta que SÍ contesta a una petición
+            reciente (comportamiento normal).
+          - 1     si es una respuesta que NADIE pidió ("ARP gratuito"):
+            la firma clásica del envenenamiento de caché ARP.
+
+        Nota honesta: el ARP gratuito también existe de forma legítima
+        (un host anunciando un cambio de IP/MAC al arrancar), así que
+        esta señal por sí sola no prueba un ataque -es un indicio, y el
+        modelo la combina con el resto de características-.
+        """
+        now = time.time()
+        # Limpiar peticiones caducadas para que el diccionario no crezca
+        # sin límite en tiradas largas.
+        if len(self.recent_arp_requests) > 1000:
+            self.recent_arp_requests = {
+                ip: t for ip, t in self.recent_arp_requests.items()
+                if now - t <= ARP_REQUEST_TTL
+            }
+
+        # Valores numéricos (1=petición, 2=respuesta) en vez de las
+        # constantes de Ryu: son los códigos estándar del protocolo ARP
+        # y coinciden con lo que aparece en la columna arp_opcode del
+        # CSV ya generado, así que no dependemos de cómo se llamen las
+        # constantes en la versión de Ryu instalada.
+        if arp_pkt.opcode == 1:
+            # Alguien pregunta "¿quién tiene dst_ip?" -> anotarlo.
+            self.recent_arp_requests[arp_pkt.dst_ip] = now
+            return None
+
+        if arp_pkt.opcode == 2:
+            # "src_ip está en src_mac": ¿lo había preguntado alguien?
+            t = self.recent_arp_requests.get(arp_pkt.src_ip)
+            return 0 if (t is not None and now - t <= ARP_REQUEST_TTL) else 1
+
+        return None
+
+    def _check_ip_mac(self, claimed_ip, claimed_mac):
+        """Comprueba (y aprende, si es la primera vez) la relación IP->MAC.
+
+        Devuelve 1 si la MAC declarada coincide con la primera vista
+        para esa IP (o es la primera vez que se ve, nada que
+        contradecir), 0 si NO coincide -señal de spoofing-. Ver
+        self.ip_to_mac para el porqué de no sobrescribir nunca.
+        Comparación insensible a mayúsculas/minúsculas -Mininet y Ryu
+        podrían representar la misma MAC con distinto casing-.
+        """
+        claimed_mac = claimed_mac.lower()
+        known_mac = self.ip_to_mac.get(claimed_ip)
+        if known_mac is None:
+            self.ip_to_mac[claimed_ip] = claimed_mac
+            return 1
+        return 1 if known_mac == claimed_mac else 0
+
     def _flow_key(self, dpid, get_field):
         """Genera una tupla identificadora única (DNI) para cada flujo.
         
@@ -225,6 +418,8 @@ class SDNFlowMonitor(app_manager.RyuApp):
         """Maneja paquetes desconocidos (table-miss): aprende direcciones MAC,
         construye reglas granulares (L2-L4/ARP) y reenvía el paquete inicial.
         """
+        self._try_load_host_identities()
+
         msg = ev.msg
         datapath = msg.datapath
         ofproto = datapath.ofproto
@@ -246,6 +441,8 @@ class SDNFlowMonitor(app_manager.RyuApp):
 
         match_fields = {"in_port": in_port, "eth_src": src, "eth_dst": dst}
         tcp_flags = None
+        ip_mac_consistent = None
+        arp_unsolicited = None
 
         ip_pkt = pkt.get_protocol(ipv4.ipv4)
         arp_pkt = pkt.get_protocol(arp.arp)
@@ -255,6 +452,7 @@ class SDNFlowMonitor(app_manager.RyuApp):
             match_fields["ipv4_src"] = ip_pkt.src
             match_fields["ipv4_dst"] = ip_pkt.dst
             match_fields["ip_proto"] = ip_pkt.proto
+            ip_mac_consistent = self._check_ip_mac(ip_pkt.src, src)
 
             tcp_pkt = pkt.get_protocol(tcp.tcp)
             udp_pkt = pkt.get_protocol(udp.udp)
@@ -286,6 +484,11 @@ class SDNFlowMonitor(app_manager.RyuApp):
             match_fields["arp_tpa"] = arp_pkt.dst_ip
             match_fields["arp_sha"] = arp_pkt.src_mac
             match_fields["arp_op"] = arp_pkt.opcode
+            # arp_pkt.src_mac (campo "sender hardware address" del propio
+            # ARP) en vez de "src" (eth_src de la trama) -es el campo que
+            # el spoofing de ARP manipula directamente, más preciso aquí-.
+            ip_mac_consistent = self._check_ip_mac(arp_pkt.src_ip, arp_pkt.src_mac)
+            arp_unsolicited = self._check_arp_solicited(arp_pkt)
 
         if out_port != ofproto.OFPP_FLOOD:
             match = parser.OFPMatch(**match_fields)
@@ -299,6 +502,10 @@ class SDNFlowMonitor(app_manager.RyuApp):
             self.pending_offsets[flow_key] = (extra_p + 1, extra_b + msg.total_len)
             if tcp_flags is not None:
                 self.pending_tcp_flags[flow_key] = tcp_flags
+            if ip_mac_consistent is not None:
+                self.pending_ip_mac_consistent[flow_key] = ip_mac_consistent
+            if arp_unsolicited is not None:
+                self.pending_arp_unsolicited[flow_key] = arp_unsolicited
 
         data = None
         if msg.buffer_id == ofproto.OFP_NO_BUFFER:
@@ -328,7 +535,13 @@ class SDNFlowMonitor(app_manager.RyuApp):
         de flujo del switch y prevenir la contaminación entre fases.
         """
         while True:
-            current = self._read_current_label()
+            current_label, current_phase, _ = self._read_current_label()
+            # Comparar por (label, phase_id): así también se detecta el
+            # cambio entre dos fases CONSECUTIVAS DEL MISMO TIPO (p.ej.
+            # scanning -> scanning), que antes pasaban desapercibidas y
+            # no vaciaban las tablas -dejando que los flujos de la fase
+            # anterior contaminaran la siguiente-.
+            current = (current_label, current_phase)
             flush_request = self._read_flush_request()
             need_flush = False
 
@@ -336,7 +549,7 @@ class SDNFlowMonitor(app_manager.RyuApp):
                 if self._last_label is not None:
                     self.logger.info(
                         "Cambio de fase detectado: %s -> %s. Vaciando tablas de flujo.",
-                        self._last_label, current,
+                        self._last_label[0], current_label,
                     )
                     need_flush = True
                 self._last_label = current
@@ -372,6 +585,11 @@ class SDNFlowMonitor(app_manager.RyuApp):
         self.prev_stats.clear()
         self.pending_offsets.clear()
         self.pending_tcp_flags.clear()
+        self.pending_ip_mac_consistent.clear()
+        self.pending_arp_unsolicited.clear()
+        # NOTA: self.ip_to_mac NO se limpia aquí a propósito -es
+        # identidad de host (ver comentario en __init__), no estado de
+        # conmutación transitorio. Debe persistir toda la tirada.
 
     def _request_flow_stats(self, datapath):
         """Envía una petición de estadísticas de flujo (OFPFlowStatsRequest) al switch."""
@@ -386,7 +604,7 @@ class SDNFlowMonitor(app_manager.RyuApp):
         """
         body = ev.msg.body
         dpid = ev.msg.datapath.id
-        label = self._read_current_label()
+        phase_label, phase_id, actors = self._read_current_label()
         now = time.time()
 
         # Filtrar la regla de table-miss (prioridad 0) para procesar solo flujos individuales
@@ -399,7 +617,7 @@ class SDNFlowMonitor(app_manager.RyuApp):
         n_fresh = sum(1 for s in flow_stats if s.duration_sec == 0)
         self.logger.info(
             "[poll] dpid=%016x label=%s flows=%d (arp=%d ip=%d recien_instalados=%d)",
-            dpid, label, flow_count, n_arp, n_ip, n_fresh,
+            dpid, phase_label, flow_count, n_arp, n_ip, n_fresh,
         )
 
         for stat in flow_stats:
@@ -431,6 +649,16 @@ class SDNFlowMonitor(app_manager.RyuApp):
             # aplica" del proyecto-.
             tcp_flags = self.pending_tcp_flags.get(flow_key, "")
 
+            # Consistencia IP<->MAC (spoofing), mismo criterio que
+            # tcp_flags: "" si no se pudo calcular (p.ej. flujo previo
+            # al arranque del controlador).
+            ip_mac_consistent = self.pending_ip_mac_consistent.get(flow_key, "")
+
+            # Respuesta ARP no solicitada (ARP gratuito): "" si el flujo
+            # no es una respuesta ARP (mismo criterio que el resto de
+            # columnas "no aplica").
+            arp_unsolicited_reply = self.pending_arp_unsolicited.get(flow_key, "")
+
             # Sumar el offset del paquete inicial consumido durante el PacketIn
             extra_p, extra_b = self.pending_offsets.pop(flow_key, (0, 0))
             packet_count = stat.packet_count + extra_p
@@ -455,6 +683,12 @@ class SDNFlowMonitor(app_manager.RyuApp):
 
             avg_pkt_size = (byte_count / packet_count) if packet_count > 0 else 0
 
+            # Etiqueta POR FLUJO: la de la fase solo si este flujo
+            # involucra a los actores del ataque (ver _label_for_flow).
+            label = self._label_for_flow(
+                phase_label, actors, ip_src, ip_dst, arp_spa, arp_tpa,
+            )
+
             if label == "warmup" and not config.WRITE_WARMUP_ROWS:
                 continue
 
@@ -464,12 +698,14 @@ class SDNFlowMonitor(app_manager.RyuApp):
                 ip_src, ip_dst, ip_proto,
                 tcp_src, tcp_dst, udp_src, udp_dst,
                 tcp_flags,
+                ip_mac_consistent,
+                arp_unsolicited_reply,
                 arp_op, arp_spa, arp_tpa, arp_sha,
                 stat.duration_sec, stat.duration_nsec,
                 stat.idle_timeout, stat.hard_timeout,
                 packet_count, byte_count,
                 round(pps, 2), round(bps, 2), round(avg_pkt_size, 2),
-                flow_count, label,
+                flow_count, phase_id, label,
             ]
             self.csv_writer.writerow(row)
         self.csv_fp.flush()

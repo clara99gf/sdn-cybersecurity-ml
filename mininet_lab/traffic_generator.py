@@ -66,9 +66,39 @@ SETTLE = config.PHASE_SETTLE_SECONDS
 MAX_ROWS_PER_PHASE = config.MAX_ROWS_PER_PHASE
 
 
-def set_label(label):
+_phase_counter = 0
+
+
+def set_label(label, actors=None):
+    """Escribe la etiqueta de la fase actual, su identificador y (opcional)
+    los ACTORES del ataque.
+
+    El id es necesario porque el generador elige el tipo de fase al azar,
+    así que salen a menudo VARIAS FASES SEGUIDAS DEL MISMO TIPO (p.ej. 7
+    fases de scanning consecutivas). Deduciendo la fase solo por cambios
+    de etiqueta -como se hacía antes-, todas esas se fusionaban en un
+    único grupo gigante para GroupKFold: menos grupos, mucho más
+    desiguales, y evaluación menos fiable. Con un id explícito, cada
+    llamada a set_label() es una fase distinta aunque repita etiqueta.
+
+    `actors` son las IPs implicadas en el ataque (atacante(s) y
+    víctima(s)). El controlador etiqueta como ATAQUE solo los flujos que
+    involucran a esos hosts, y como "normal" el resto del tráfico que
+    ocurre a la vez -antes se etiquetaba TODO lo que pasara durante la
+    fase, aunque un escaneo lo lance UN host y en esas fases aparezcan
+    ~12 hosts origen distintos: la mayoría de filas eran tráfico de fondo
+    con etiqueta de ataque, ruido puro que impedía separar las clases
+    (medido: F1 0.60 -> 0.70 solo con etiquetar bien)-. Es además el
+    criterio estándar en datasets del área (CICIDS y similares etiquetan
+    por pareja origen/destino del ataque, no por franja horaria).
+
+    Formato: "label,phase_id,ip1|ip2|..."
+    """
+    global _phase_counter
+    _phase_counter += 1
+    actors_str = "|".join(sorted(set(actors))) if actors else ""
     with open(LABEL_FILE, "w") as f:
-        f.write(label)
+        f.write(f"{label},{_phase_counter},{actors_str}")
 
 
 def _log(msg):
@@ -270,7 +300,18 @@ def scanning_traffic(net, duration):
     _kill_all_attack_tools()
     _arp_warmup(net, attacker, targets)
 
-    set_label("scanning")
+    # SOLO el atacante como actor, NO los objetivos. Un escaneo apunta a
+    # (casi) todos los hosts, así que si se incluyeran los objetivos como
+    # actores, el etiquetado por flujo marcaría como "scanning" cualquier
+    # flujo dirigido a cualquier host -es decir, TODO el tráfico de fondo-
+    # y no filtraría nada (bug detectado: en las fases de scanning
+    # aparecían los 16 hosts como origen, con ~1400 filas ARP de fondo
+    # etiquetadas como ataque). Un flujo es scanning si lo ORIGINA el
+    # atacante; el tráfico hacia una víctima que NO viene del atacante es
+    # fondo, y debe quedar como normal. _label_for_flow comprueba tanto
+    # origen como destino, así que con el atacante basta para capturar
+    # sus sondas (él es el origen) y sus respuestas (él es el destino).
+    set_label("scanning", actors=[attacker.IP()])
     baseline = _count_csv_rows()
     end_time = time.time() + duration
 
@@ -287,16 +328,25 @@ def scanning_traffic(net, duration):
     while time.time() < end_time and not _cap_exceeded(baseline):
         target = random.choice(targets)
         if random.random() < ACK_PROBE_PROBABILITY:
-            # Sonda ACK suelta vía hping3 (no nmap): un paquete TCP con
-            # SOLO el flag ACK activado, sin conexión previa -firma de
-            # tráfico distinta de un SYN normal (ddos/spoofing) o de un
+            # Sonda ACK vía hping3 (no nmap): paquetes TCP con SOLO el
+            # flag ACK activado, sin conexión previa -firma de tráfico
+            # distinta de un SYN normal (ddos/spoofing) o de un
             # handshake completo (normal)-. Mismo mecanismo de puerto
             # origen fijo (-k -s) que ya usamos en ddos/spoofing para
             # evitar un flujo nuevo por paquete.
+            #
+            # -c 5 -i u200000 (5 paquetes, 1 cada 0.2s) en vez de "-c 1":
+            # con un único paquete el flujo vivía milisegundos y casi
+            # nunca sobrevivía hasta el siguiente sondeo del controlador
+            # -era señal generada pero NO capturada, justo el cuello de
+            # botella que limita la separación entre clases-. Con ~1s de
+            # actividad, el flujo cruza al menos un sondeo
+            # (POLL_INTERVAL=1s) y llega al CSV, sin dejar de ser una
+            # sonda ligera.
             port = random.randint(1, 30)
             _log(f"[scanning] {attacker.name} -> {target.IP()} :: hping3 -A -p {port}")
             pid = _start_bg(
-                attacker, f"hping3 -A -c 1 -k -s 5099 -p {port} {target.IP()}",
+                attacker, f"hping3 -A -c 5 -i u200000 -k -s 5099 -p {port} {target.IP()}",
             )
         else:
             flags = f"-Pn {random.choice(scan_types)} {random.choice(timing)}"
@@ -319,45 +369,59 @@ def scanning_traffic(net, duration):
 # ------------------------------------------------------------------ #
 def spoofing_traffic(net, duration):
     """Elige aleatoriamente entre ARP spoofing (envenenamiento de caché ARP)
-    e IP spoofing (paquetes TCP con IP origen falsificada vía hping3)."""
+    e IP spoofing (paquetes TCP con IP origen falsificada vía hping3).
+
+    Los actores se eligen AQUÍ (antes de set_label) para poder pasárselos
+    al controlador y que etiquete solo los flujos del ataque -ver
+    set_label()-.
+    """
     _kill_all_attack_tools()
-    set_label("spoofing")
-    baseline = _count_csv_rows()
-    variant = random.choice(["arp", "ip"])
-    if variant == "arp":
-        _arp_spoofing(net, duration, baseline)
-    else:
-        _ip_spoofing(net, duration, baseline)
-    _settle()
-
-
-def _arp_spoofing(net, duration, baseline):
     hosts = net.hosts
     attacker = random.choice(hosts)
     others = [h for h in hosts if h != attacker]
-    victim, impersonated = random.sample(others, 2)
+    variant = random.choice(["arp", "ip"])
+    if variant == "arp":
+        # ARP spoofing MULTI-VÍCTIMA: 2-4 víctimas + 1 identidad
+        # suplantada. Un ARP spoofing real rara vez ataca a un solo
+        # host; envenenar a varios a la vez es más realista y, sobre
+        # todo, genera bastantes más flujos capturables -antes una fase
+        # de spoofing dejaba apenas 1-3 flujos en toda la red-.
+        n_victims = random.randint(2, 4)
+        picked = random.sample(others, n_victims + 1)
+        victims = picked[:n_victims]
+        impersonated = picked[n_victims]
+        actors = [attacker.IP(), impersonated.IP()] + [v.IP() for v in victims]
+        set_label("spoofing", actors=actors)
+        baseline = _count_csv_rows()
+        _arp_spoofing(net, duration, baseline, attacker, victims, impersonated)
+    else:
+        victim, fake_source = random.sample(others, 2)
+        set_label("spoofing", actors=[attacker.IP(), victim.IP(), fake_source.IP()])
+        baseline = _count_csv_rows()
+        _ip_spoofing(net, duration, baseline, attacker, victim, fake_source)
+    _settle()
 
-    _log(f"[spoofing:arp] {attacker.name} suplanta {impersonated.IP()} ante {victim.IP()}")
+
+def _arp_spoofing(net, duration, baseline, attacker, victims, impersonated):
+    victim_ips = " ".join(v.IP() for v in victims)
+    _log(f"[spoofing:arp] {attacker.name} suplanta {impersonated.IP()} ante "
+         f"{[v.name for v in victims]}")
     pid = _start_bg(
         attacker,
-        f"{PYTHON_BIN} {SPOOF_SCRIPT} {victim.IP()} {impersonated.IP()} {attacker.MAC()}",
+        f"{PYTHON_BIN} {SPOOF_SCRIPT} {impersonated.IP()} {attacker.MAC()} {victim_ips}",
     )
     _sleep_with_cap(duration, baseline, "spoofing:arp")
     _kill_pid(attacker, pid)
     attacker.cmd("pkill -9 -f arp_spoof.py 2>/dev/null")
 
 
-def _ip_spoofing(net, duration, baseline):
+def _ip_spoofing(net, duration, baseline, attacker, victim, fake_source):
     """El atacante envía TCP a 'victim' falsificando la IP origen como si
     fuera 'fake_source'.
     Puerto origen fijo (-k -s) para no generar un flujo nuevo por paquete.
     Puerto DESTINO variable (antes siempre 80): varios servicios reales
     detrás de spoofing, no solo HTTP -más variedad, mismo mecanismo de
     puerto origen fijo que evita la explosión de flujos-."""
-    hosts = net.hosts
-    attacker = random.choice(hosts)
-    others = [h for h in hosts if h != attacker]
-    victim, fake_source = random.sample(others, 2)
     target_port = random.choice([80, 443, 22])
 
     _log(f"[spoofing:ip] {attacker.name} -> {victim.IP()}:{target_port} con IP falsa {fake_source.IP()}")
@@ -386,7 +450,7 @@ def ddos_traffic(net, duration):
     _kill_all_attack_tools()
     _arp_warmup(net, victim, chosen_attackers)  # y en el sentido inverso también
 
-    set_label("ddos")
+    set_label("ddos", actors=[victim.IP()] + [a.IP() for a in chosen_attackers])
     baseline = _count_csv_rows()
 
     flood_type = random.choice(["--syn", "--udp", "--icmp"])

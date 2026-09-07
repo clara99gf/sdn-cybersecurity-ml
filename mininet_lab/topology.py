@@ -72,6 +72,12 @@ def main():
     info("*** Comprobando conectividad básica (pingAll)...\n")
     net.pingAll()
 
+    info("*** Escribiendo identidades reales de host (IP/MAC) para el "
+         "controlador...\n")
+    with open(config.HOST_IDENTITY_FILE, "w") as f:
+        for host in net.hosts:
+            f.write(f"{host.IP()},{host.MAC()}\n")
+
     # try/finally: igual que ya hace run_01_dataset.py -si se interrumpe
     # con Ctrl+C (frecuente en el modo de prueba manual, CLI incluida) o
     # falla algo, net.stop() y "mn -c" se ejecutan de todas formas, sin
