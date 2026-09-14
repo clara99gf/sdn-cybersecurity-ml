@@ -12,7 +12,7 @@ CSV etiquetado para entrenar), este controlador:
   3. MITIGA: si un flujo se clasifica como ataque (ddos/scanning/
      spoofing), inyecta una regla OpenFlow (OFPFlowMod) de prioridad
      alta y acción DROP para bloquear ese tráfico.
-  4. Registra métricas a un CSV de eventos (metrics/defense_events.csv):
+  4. Registra métricas a un CSV de eventos (results/metrics/defense_events.csv):
      por cada flujo evaluado guarda su predicción, el tiempo de
      inferencia del modelo, la latencia del plano de control (desde que
      llega el EventOFPFlowStatsReply hasta que se envía el OFPFlowMod de
@@ -26,12 +26,24 @@ Uso (lo lanza run_03_defense.py; no suele ejecutarse a mano):
 """
 import csv
 import os
+import sys
 import threading
 import time
 from datetime import datetime
 
+# ryu-manager ejecuta este archivo directamente (no como parte del
+# paquete 'controller'), así que 'from controller.x import ...' falla y
+# ryu muere al arrancar. Añadimos al sys.path tanto la raíz del proyecto
+# (para 'import config') como la carpeta controller/ (para
+# 'import live_classifier'), igual que hace sdn_monitor.py con config.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.dirname(_HERE)
+for _p in (_ROOT, _HERE):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
 import config
-from controller.live_classifier import LiveClassifier
+from live_classifier import LiveClassifier
 
 from ryu.base import app_manager
 from ryu.controller import ofp_event
@@ -50,22 +62,41 @@ try:
 except ImportError:
     _HAS_PSUTIL = False
 
+# Sondeo cada 1s (igual que en la generación del dataset). Se probó
+# bajarlo a 0.5s para capturar mejor las sondas de escaneo, pero con el
+# modelo tardando ~30ms por flujo y cientos de flujos por sondeo, 0.5s
+# saturaba el controlador. 1s es el equilibrio estable.
 POLL_INTERVAL = config.POLL_INTERVAL
 FLOW_IDLE_TIMEOUT = config.FLOW_IDLE_TIMEOUT
 FLOW_HARD_TIMEOUT = config.FLOW_HARD_TIMEOUT
 ATTACK_CLASSES = {"ddos", "scanning", "spoofing"}
 MITIGATION_PRIORITY = 100  # muy por encima de las reglas normales
+# Marca (cookie) de las reglas DROP de mitigación, para poder borrarlas
+# selectivamente sin tocar la table-miss ni las reglas de reenvío.
+DROP_COOKIE = 0xD0D0
+# Máximo de flujos que el controlador clasifica por sondeo. Evita que el
+# aluvión de flujos de un escaneo (cientos) sature el controlador. 150
+# es de sobra para tráfico normal/ddos/spoofing y acota el peor caso.
+MAX_FLOWS_PER_POLL = 150
 ARP_REQUEST_TTL = 5.0      # ventana para "respuesta ARP solicitada" (ver sdn_monitor)
 
-METRICS_DIR = os.path.join(config.PROJECT_ROOT, "metrics")
+METRICS_DIR = os.path.join(config.PROJECT_ROOT, "results", "metrics")
 os.makedirs(METRICS_DIR, exist_ok=True)
 EVENTS_CSV = os.path.join(METRICS_DIR, "defense_events.csv")
+# Archivo-interruptor: el orquestador lo crea al empezar una prueba y lo
+# borra al terminar. El controlador SOLO clasifica y mitiga mientras
+# existe. Así, durante el arranque (pingAll) y los periodos de reposo,
+# el controlador actúa como un switch normal y NO bloquea nada -antes,
+# clasificaba el tráfico del pingAll inicial como ataque y lo mitigaba,
+# tumbando la red antes de empezar-.
+ACTIVE_FLAG = os.path.join(config.RUNTIME_DIR, "defense_active.flag")
 
 EVENT_HEADERS = [
-    "timestamp", "event_type", "dpid", "src", "dst", "dst_port",
+    "timestamp", "traffic_phase", "event_type", "dpid", "src", "dst", "dst_port",
     "predicted_label", "inference_ms", "control_latency_ms",
-    "mitigated", "pkt_rate", "distinct_ports", "distinct_sources",
-    "ryu_cpu_percent",
+    "mitigated", "pkt_rate", "flow_count_per_dpid",
+    "distinct_ports", "distinct_targets",
+    "distinct_sources", "ryu_cpu_percent",
 ]
 
 
@@ -102,8 +133,13 @@ class SDNDefense(app_manager.RyuApp):
         self._init_events_csv()
 
         self.monitor_thread = hub.spawn(self._monitor_loop)
+        # Muestreo de CPU del proceso Ryu: con psutil si está disponible,
+        # y si no, leyendo /proc (siempre disponible en Linux). Así la
+        # gráfica de CPU nunca sale plana a 0 por falta de psutil.
         if self._proc is not None:
             hub.spawn(self._cpu_loop)
+        else:
+            hub.spawn(self._cpu_loop_proc)
 
     # ------------------------------------------------------------------ #
     # Registro de datapaths
@@ -221,9 +257,19 @@ class SDNDefense(app_manager.RyuApp):
         # estadísticas de ese flujo.
         ip_pkt = pkt.get_protocol(ipv4.ipv4)
         arp_pkt = pkt.get_protocol(arp.arp)
+        # match_fields se usa para DOS cosas: la clave del flujo y el
+        # match de la regla OpenFlow. Debe incluir eth_type y los campos
+        # L3/L4 -si la regla solo tuviera eth_src/eth_dst, las
+        # estadísticas de ese flujo NO traerían IP/puertos/ARP y el
+        # modelo no podría clasificar (era el bug del CSV vacío)-.
+        match_fields = {"in_port": in_port, "eth_src": eth.src, "eth_dst": eth.dst}
         fields = {"eth_src": eth.src, "eth_dst": eth.dst}
         tcp_flags = ip_mac = arp_unsol = None
         if ip_pkt:
+            match_fields["eth_type"] = ether_types.ETH_TYPE_IP
+            match_fields["ipv4_src"] = ip_pkt.src
+            match_fields["ipv4_dst"] = ip_pkt.dst
+            match_fields["ip_proto"] = ip_pkt.proto
             fields["ipv4_src"] = ip_pkt.src
             fields["ipv4_dst"] = ip_pkt.dst
             fields["ip_proto"] = ip_pkt.proto
@@ -231,13 +277,21 @@ class SDNDefense(app_manager.RyuApp):
             tcp_pkt = pkt.get_protocol(tcp.tcp)
             udp_pkt = pkt.get_protocol(udp.udp)
             if tcp_pkt:
+                match_fields["tcp_src"] = tcp_pkt.src_port
+                match_fields["tcp_dst"] = tcp_pkt.dst_port
                 fields["tcp_src"] = tcp_pkt.src_port
                 fields["tcp_dst"] = tcp_pkt.dst_port
                 tcp_flags = tcp_pkt.bits
             elif udp_pkt:
+                match_fields["udp_src"] = udp_pkt.src_port
+                match_fields["udp_dst"] = udp_pkt.dst_port
                 fields["udp_src"] = udp_pkt.src_port
                 fields["udp_dst"] = udp_pkt.dst_port
         elif arp_pkt:
+            match_fields["eth_type"] = ether_types.ETH_TYPE_ARP
+            match_fields["arp_spa"] = arp_pkt.src_ip
+            match_fields["arp_tpa"] = arp_pkt.dst_ip
+            match_fields["arp_op"] = arp_pkt.opcode
             fields["arp_spa"] = arp_pkt.src_ip
             fields["arp_tpa"] = arp_pkt.dst_ip
             fields["arp_op"] = arp_pkt.opcode
@@ -253,7 +307,10 @@ class SDNDefense(app_manager.RyuApp):
             self.pending_arp_unsolicited[fk] = arp_unsol
 
         if out_port != dp.ofproto.OFPP_FLOOD:
-            match = parser.OFPMatch(in_port=in_port, eth_dst=eth.dst, eth_src=eth.src)
+            # Regla GRANULAR (con eth_type/IP/puertos/ARP): así las
+            # estadísticas de este flujo traerán esos campos y el modelo
+            # podrá clasificarlo.
+            match = parser.OFPMatch(**match_fields)
             self._add_flow(dp, 1, match, actions,
                            idle=FLOW_IDLE_TIMEOUT, hard=FLOW_HARD_TIMEOUT)
 
@@ -266,22 +323,102 @@ class SDNDefense(app_manager.RyuApp):
     # Sondeo periódico de estadísticas
     # ------------------------------------------------------------------ #
     def _monitor_loop(self):
+        was_active = False
         while True:
-            for dp in list(self.datapaths.values()):
-                parser = dp.ofproto_parser
-                dp.send_msg(parser.OFPFlowStatsRequest(dp))
+            try:
+                active = os.path.exists(ACTIVE_FLAG)
+                # Limpiar los switches en CUALQUIER transición de estado:
+                # al activar una prueba (para empezar con la red limpia) y
+                # al terminarla (para retirar las reglas DROP). Así cada
+                # prueba parte de switches vacíos pero operativos, y
+                # ninguna prueba arrastra reglas de la anterior -era la
+                # causa de que, tras la primera prueba, las siguientes no
+                # registraran eventos-.
+                if active != was_active:
+                    self._clear_mitigation_rules()
+                was_active = active
+                for dp in list(self.datapaths.values()):
+                    parser = dp.ofproto_parser
+                    dp.send_msg(parser.OFPFlowStatsRequest(dp))
+            except Exception as e:
+                self.logger.warning("[defense] error en monitor_loop: %s", e)
             hub.sleep(POLL_INTERVAL)
 
+    def _clear_mitigation_rules(self):
+        """Deja los switches limpios y funcionales (igual que el
+        _flush_all_flows del monitor del dataset, que cambia de fase
+        decenas de veces sin romperse): borra TODAS las reglas y reinstala
+        la table-miss. Se usa el mismo OFPFlowMod que el dataset
+        (priority=0, instructions=[])."""
+        for dp in list(self.datapaths.values()):
+            parser = dp.ofproto_parser
+            ofp = dp.ofproto
+            dp.send_msg(parser.OFPFlowMod(
+                datapath=dp, command=ofp.OFPFC_DELETE,
+                out_port=ofp.OFPP_ANY, out_group=ofp.OFPG_ANY,
+                match=parser.OFPMatch(), priority=0, instructions=[],
+            ))
+            # Reinstalar la table-miss (la borra el match comodín).
+            miss = [parser.OFPActionOutput(ofp.OFPP_CONTROLLER,
+                                           ofp.OFPCML_NO_BUFFER)]
+            self._add_flow(dp, 0, parser.OFPMatch(), miss)
+        self.mac_to_port.clear()
+        self.prev_stats.clear()
+        self.pending_tcp_flags.clear()
+        self.pending_ip_mac_consistent.clear()
+        self.pending_arp_unsolicited.clear()
+        self.mitigated.clear()
+        self.logger.info("[defense] Switches limpios y table-miss reinstalada.")
+
     def _cpu_loop(self):
-        # cpu_percent con intervalo bloqueante da el uso del proceso Ryu.
+        # Con psutil: uso de CPU del proceso Ryu (más preciso).
         while True:
             self._cpu = self._proc.cpu_percent(interval=1.0)
+
+    def _cpu_loop_proc(self):
+        """Medición de CPU SIN psutil, leyendo /proc/self/stat de Linux.
+        Calcula el % de CPU del proceso Ryu entre dos lecturas separadas
+        1s. Se usa como respaldo si psutil no está instalado en el venv,
+        para que la gráfica de CPU no salga plana a 0."""
+        import time as _t
+        hz = os.sysconf("SC_CLK_TCK")  # ticks por segundo
+        ncpu = os.cpu_count() or 1
+
+        def _read():
+            with open("/proc/self/stat") as f:
+                parts = f.read().split()
+            # utime (14) + stime (15), en ticks
+            return int(parts[13]) + int(parts[14])
+
+        prev = _read()
+        prev_t = _t.time()
+        while True:
+            _t.sleep(1.0)
+            cur = _read()
+            cur_t = _t.time()
+            dt = cur_t - prev_t
+            used = (cur - prev) / hz          # segundos de CPU consumidos
+            self._cpu = max(0.0, 100.0 * used / (dt * ncpu))
+            prev, prev_t = cur, cur_t
 
     # ------------------------------------------------------------------ #
     # Clasificación + mitigación al recibir estadísticas
     # ------------------------------------------------------------------ #
     @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
     def _stats_reply(self, ev):
+        # Solo clasificar y mitigar cuando hay una prueba en marcha (el
+        # orquestador crea ACTIVE_FLAG). Fuera de una prueba -arranque,
+        # pingAll, reposo- el controlador actúa como un switch normal y
+        # no toca el tráfico. Esto evita que el tráfico legítimo del
+        # arranque se clasifique como ataque y se bloquee.
+        if not os.path.exists(ACTIVE_FLAG):
+            return
+        # Tipo de prueba en marcha (lo escribe el orquestador en el flag).
+        try:
+            with open(ACTIVE_FLAG) as f:
+                phase = f.read().strip() or "?"
+        except OSError:
+            phase = "?"
         t_event = time.perf_counter()   # inicio de la latencia del plano de control
         dp = ev.msg.datapath
         dpid = dp.id
@@ -289,34 +426,58 @@ class SDNDefense(app_manager.RyuApp):
         flow_stats = [s for s in ev.msg.body if s.priority not in (0, MITIGATION_PRIORITY)]
         flow_count = len(flow_stats)
 
+        # Límite de flujos clasificados por sondeo. El escaneo genera
+        # CIENTOS de flujos (nmap abre una conexión por puerto), y
+        # clasificar cada uno con el modelo (~30ms) satura el controlador
+        # -se atasca y deja de responder, rompiendo la red para las
+        # pruebas siguientes-. Procesando como mucho MAX_FLOWS_PER_POLL
+        # por sondeo, el controlador sigue el ritmo. La muestra sigue
+        # siendo representativa (los flujos se priorizan por más
+        # paquetes, que son los más relevantes).
+        if flow_count > MAX_FLOWS_PER_POLL:
+            flow_stats = sorted(flow_stats, key=lambda s: s.packet_count,
+                                reverse=True)[:MAX_FLOWS_PER_POLL]
+
         for stat in flow_stats:
-            raw, src, dst, dst_port = self._extract(stat, flow_count, dpid)
-            if raw is None:
+            try:
+                raw, src, dst, dst_port = self._extract(stat, flow_count, dpid)
+                if raw is None:
+                    continue
+                flow_key = (dpid, src, dst, dst_port)
+
+                label, infer_ms, wfeats = self.classifier.predict(raw, now=now)
+                raw["distinct_ports"] = wfeats["distinct_ports"]
+                raw["distinct_targets"] = wfeats["distinct_targets"]
+                raw["distinct_sources"] = wfeats["distinct_sources"]
+
+                mitigated = False
+                latency_ms = None
+                if label in ATTACK_CLASSES and flow_key not in self.mitigated:
+                    self._install_drop(dp, stat.match)
+                    self.mitigated.add(flow_key)
+                    mitigated = True
+                    # Latencia del plano de control: evento -> regla enviada
+                    latency_ms = (time.perf_counter() - t_event) * 1000.0
+
+                self._record_event(now, phase, "classify", dpid, src, dst, dst_port,
+                                   label, infer_ms, latency_ms, mitigated, raw)
+            except Exception as e:
+                # Un flujo problemático no debe abortar el procesamiento de
+                # los demás ni matar el handler de estadísticas.
+                self.logger.warning("[defense] error clasificando un flujo: %s", e)
                 continue
-            flow_key = (dpid, src, dst, dst_port)
-
-            label, infer_ms = self.classifier.predict(raw, now=now)
-
-            mitigated = False
-            latency_ms = None
-            if label in ATTACK_CLASSES and flow_key not in self.mitigated:
-                self._install_drop(dp, stat.match)
-                self.mitigated.add(flow_key)
-                mitigated = True
-                # Latencia del plano de control: evento -> regla enviada
-                latency_ms = (time.perf_counter() - t_event) * 1000.0
-
-            self._record_event(now, "classify", dpid, src, dst, dst_port,
-                               label, infer_ms, latency_ms, mitigated, raw)
 
     def _install_drop(self, dp, match):
         """Inyecta una regla OFPFlowMod de prioridad alta con acción DROP
-        (lista de acciones vacía = descartar) para el flujo indicado."""
+        (lista de acciones vacía = descartar) para el flujo indicado.
+        Se marca con DROP_COOKIE para poder borrarla luego SIN tocar el
+        resto de reglas del switch."""
         parser = dp.ofproto_parser
         # Sin instrucciones de acción = DROP en OpenFlow 1.3.
         mod = parser.OFPFlowMod(
             datapath=dp, priority=MITIGATION_PRIORITY, match=match,
             instructions=[], idle_timeout=0, hard_timeout=0,
+            cookie=DROP_COOKIE,
         )
         dp.send_msg(mod)
 
@@ -379,19 +540,27 @@ class SDNDefense(app_manager.RyuApp):
     # Registro de eventos a CSV
     # ------------------------------------------------------------------ #
     def _init_events_csv(self):
-        with open(EVENTS_CSV, "w", newline="") as f:
-            csv.writer(f).writerow(EVENT_HEADERS)
+        # Escribe la cabecera SOLO si el archivo no existe. Así el
+        # orquestador puede "resetear" las métricas simplemente borrando
+        # el CSV, y el controlador repone la cabecera en el siguiente
+        # evento -sin borrar lo que se vaya acumulando entre pruebas-.
+        if not os.path.exists(EVENTS_CSV):
+            with open(EVENTS_CSV, "w", newline="") as f:
+                csv.writer(f).writerow(EVENT_HEADERS)
 
-    def _record_event(self, now, event_type, dpid, src, dst, dst_port,
+    def _record_event(self, now, phase, event_type, dpid, src, dst, dst_port,
                       label, infer_ms, latency_ms, mitigated, raw):
+        self._init_events_csv()  # repone la cabecera si el CSV fue borrado (reset)
         row = [
             datetime.now().isoformat(timespec="milliseconds"),
-            event_type, f"{dpid:016x}", src, dst, dst_port, label,
+            phase, event_type, f"{dpid:016x}", src, dst, dst_port, label,
             round(infer_ms, 4) if infer_ms is not None else "",
             round(latency_ms, 4) if latency_ms is not None else "",
             int(mitigated),
             raw.get("packet_count_per_second", ""),
+            raw.get("flow_count_per_dpid", ""),
             raw.get("distinct_ports", ""),
+            raw.get("distinct_targets", ""),
             raw.get("distinct_sources", ""),
             round(self._cpu, 2),
         ]

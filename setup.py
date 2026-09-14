@@ -21,9 +21,10 @@ setup(
         "modelos de Machine Learning (Logistic Regression, Decision Tree, "
         "Random Forest) para deteccion de amenazas."
     ),
-    py_modules=["config"],
+    py_modules=["config", "feature_windows"],
     packages=find_packages(
-        include=["controller", "controller.*", "mininet_lab", "mininet_lab.*", "ml", "ml.*"]
+        include=["controller", "controller.*", "mininet_lab", "mininet_lab.*",
+                 "ml", "ml.*", "defense", "defense.*"]
     ),
     install_requires=[
         # Generación del dataset (Mininet/Ryu)
@@ -35,6 +36,10 @@ setup(
         "numpy",
         "matplotlib",
         "joblib",
+        # Fase de detección/mitigación: % CPU del proceso Ryu para la
+        # gráfica de impacto en infraestructura. Si no está, el
+        # controlador funciona igual pero no registra CPU.
+        "psutil",
     ],
     python_requires=">=3.7",
 )

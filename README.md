@@ -8,6 +8,29 @@ Genera un CSV con características de flujos OpenFlow etiquetadas como
 - **Ejecución**: `EJECUCION.md`
 - **Configuración centralizada**: `config.py`
 
+## Resultado final
+
+Dataset de 300.000 filas (~920 fases distintas). Evaluación honesta con
+GroupKFold (5 particiones agrupadas por fase de ataque, sin repartir
+ninguna fase entre train y test). Mejor modelo: **Random Forest**.
+
+| Métrica | Valor |
+|---|---|
+| **F1 macro** | **0.799 ± 0.025** |
+| Recall ddos | 70.0 % |
+| Recall normal | 87.3 % |
+| Recall scanning | 83.1 % |
+| Recall spoofing | 70.2 % |
+
+Las cuatro clases quedan equilibradas (recall 70-87 %, precisión
+74-89 %), sin ninguna clase rota que infle la media. El proyecto pasó
+de un F1 de ~0.47 (primeras versiones, con etiquetado por ventana de
+tiempo y evaluación con fuga) a 0.80, gracias sobre todo a tres
+cambios verificados con datos: etiquetado POR FLUJO (solo los flujos de
+los actores del ataque), evaluación GroupKFold agrupada por fase, y
+características que aportan señal real (ventana temporal, `tcp_flags`,
+`ip_mac_consistent`, `arp_unsolicited_reply`).
+
 **Nota sobre `data/dataset_sdn.csv`**: a diferencia de lo habitual (no
 solerlo versionar), este CSV **sí está incluido en el repositorio** a
 propósito -genera tarda varias horas (ver más abajo), y el tribunal del

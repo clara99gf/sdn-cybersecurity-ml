@@ -24,9 +24,29 @@ Carga los artefactos que guarda ml/train.py:
 """
 import os
 import time
+import warnings
 
 import numpy as np
 import pandas as pd
+
+# sklearn avisa en cada predicción de que el array no tiene nombres de
+# columna (los tenía al entrenar). Es inofensivo -las columnas van en el
+# orden correcto-, pero se repetiría en CADA flujo y saturaría el log del
+# controlador, ralentizándolo. Lo silenciamos.
+warnings.filterwarnings(
+    "ignore",
+    message="X does not have valid feature names",
+    category=UserWarning,
+)
+
+# Robustez de importación: si este módulo se carga desde el controlador
+# lanzado por ryu-manager, la raíz del proyecto podría no estar en el
+# path todavía. La añadimos para que 'config', 'feature_windows' y
+# 'ml.utils' se resuelvan igual que en el resto del proyecto.
+import sys
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
 
 import config
 from feature_windows import WindowTracker
@@ -62,6 +82,10 @@ class LiveClassifier:
             self.model = load_artifact("random_forest.pkl")
         self.scaler = load_artifact("scaler.pkl")
         self.selected_features = load_artifact("selected_features.pkl")
+        # Índices de las features seleccionadas dentro de FEATURE_ORDER,
+        # para poder cortar el vector escalado sin reconstruir un
+        # DataFrame en cada flujo (optimización del tiempo de inferencia).
+        self._selected_idx = [FEATURE_ORDER.index(f) for f in self.selected_features]
         self.encoders = load_artifact("encoders.pkl")
         self.le_y = load_artifact("le_y.pkl")
 
@@ -71,6 +95,8 @@ class LiveClassifier:
         self._src_dst = WindowTracker(self.window_s)    # origen -> destino
         self._dst_src = WindowTracker(self.window_s)    # (destino,puerto) -> origen
         self._last_ports_by_src = {}
+        self._last_window = {"distinct_ports": 0, "distinct_targets": 0,
+                             "flows_to_target": 0, "distinct_sources": 0}
 
     # -- codificación de categóricas igual que en el preprocesado -------
     def _encode_categorical(self, col, value):
@@ -120,6 +146,15 @@ class LiveClassifier:
         dports, dtargets, f2t, dsources = self._window_features(
             src_id, dst_id, dst_port, now
         )
+        # Guardar las features de ventana recién calculadas para que
+        # predict() pueda exponerlas (las usan las gráficas: p.ej.
+        # distinct_ports en la de scanning, distinct_sources en la de ddos).
+        self._last_window = {
+            "distinct_ports": dports,
+            "distinct_targets": dtargets,
+            "flows_to_target": f2t,
+            "distinct_sources": dsources,
+        }
 
         row = {
             "eth_type": self._encode_categorical("eth_type", raw.get("eth_type", 0)),
@@ -145,20 +180,23 @@ class LiveClassifier:
             "flows_to_target_5s": f2t,
             "distinct_sources_to_target_5s": dsources,
         }
-        df = pd.DataFrame([[row[c] for c in FEATURE_ORDER]], columns=FEATURE_ORDER)
-        # Escalar con el scaler del entrenamiento y quedarse con las
-        # características seleccionadas, en su orden.
-        scaled = pd.DataFrame(self.scaler.transform(df), columns=FEATURE_ORDER)
-        return scaled[self.selected_features]
+        # Vector completo en el orden del entrenamiento, escalado.
+        vec = np.array([[row[c] for c in FEATURE_ORDER]], dtype=float)
+        scaled = self.scaler.transform(vec)  # devuelve ndarray
+        # Quedarse solo con las columnas seleccionadas (por índice, sin
+        # reconstruir un DataFrame -mucho más rápido por flujo-).
+        return scaled[:, self._selected_idx]
 
     def predict(self, raw, now=None):
-        """Clasifica un flujo. Devuelve (nombre_clase, tiempo_inferencia_ms)."""
+        """Clasifica un flujo. Devuelve (nombre_clase, tiempo_inferencia_ms,
+        window_feats) donde window_feats es un dict con las features de
+        ventana calculadas (para registrarlas en las métricas/gráficas)."""
         X = self.build_feature_row(raw, now)
         t0 = time.perf_counter()
         pred = self.model.predict(X)[0]
         infer_ms = (time.perf_counter() - t0) * 1000.0
         label = self.le_y.inverse_transform([pred])[0]
-        return label, infer_ms
+        return label, infer_ms, dict(self._last_window)
 
 
 def _num(v):

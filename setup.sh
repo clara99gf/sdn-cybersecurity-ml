@@ -61,6 +61,15 @@ echo "=== 3b. Forzando numpy/scipy/scikit-learn compatibles dentro del venv ==="
 ./venv/bin/pip install --force-reinstall --no-deps "numpy<2" scipy scikit-learn
 
 echo
+echo "=== 3c. Asegurando psutil dentro del venv (fase 3: CPU de Ryu) ==="
+# psutil ya está en install_requires (setup.py), pero al ejecutarse el
+# controlador de defensa CON SUDO, --system-site-packages puede hacer
+# que no se vea si quedó solo a nivel de usuario. Lo forzamos dentro del
+# venv. (Si no estuviera, la gráfica de CPU usa un respaldo por /proc,
+# así que no es crítico, pero con psutil la medida es más precisa.)
+./venv/bin/pip install --force-reinstall --no-deps psutil
+
+echo
 echo "=== 4. Verificando dependencias tal y como se ejecutarán de verdad (con sudo) ==="
 if sudo env PYTHONNOUSERSITE=1 ./venv/bin/python3 -c "import scapy" 2>/dev/null; then
     echo "OK: scapy es visible ejecutando con sudo."
