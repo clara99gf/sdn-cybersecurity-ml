@@ -1,0 +1,5 @@
+traffic_phase,eventos,cpu_ryu_media_%,cpu_ryu_max_%,latencia_control_media_ms,latencia_control_max_ms,n_mitigaciones,inferencia_media_ms
+normal,726,9.44,23.0,10.2,12.32,12,1.345
+scanning,152,2.73,7.0,10.35,14.05,4,3.968
+ddos,102,16.53,97.9,8.96,9.89,4,2.235
+spoofing,131,3.0,5.0,7.97,8.81,3,4.235

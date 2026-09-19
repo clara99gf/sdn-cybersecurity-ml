@@ -38,6 +38,19 @@ def _kill(host, *names):
         host.cmd(f"pkill -9 -f {n} 2>/dev/null")
 
 
+def kill_all_attack_procs(net):
+    """Mata las herramientas de ataque en TODOS los hosts (no solo en el
+    atacante). Importante entre pruebas: un nmap/hping3 que siga en vuelo
+    tras terminar una prueba seguiría generando tráfico durante la
+    siguiente, dejando la red 'sucia' -era la causa de que, tras el
+    scanning, la prueba siguiente no registrara nada-."""
+    for h in net.hosts:
+        h.cmd("pkill -9 -f nmap 2>/dev/null")
+        h.cmd("pkill -9 -f hping3 2>/dev/null")
+        h.cmd("pkill -9 -f arp_spoof 2>/dev/null")
+        h.cmd("pkill -9 -f iperf 2>/dev/null")
+
+
 def normal_traffic(net, duration):
     """Tráfico legítimo: MISMAS variantes que en el dataset (ping,
     iperf TCP, iperf UDP con anchos de banda variados). Se reutilizan los

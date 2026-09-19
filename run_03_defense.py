@@ -34,7 +34,30 @@ EVENTS_CSV = os.path.join(config.PROJECT_ROOT, "results", "metrics", "defense_ev
 # Archivo-interruptor que activa la detección/mitigación en el controlador
 # (ver ACTIVE_FLAG en sdn_defense.py). Solo existe mientras corre una prueba.
 ACTIVE_FLAG = os.path.join(config.RUNTIME_DIR, "defense_active.flag")
+# Flag que el controlador crea cuando ha terminado de limpiar las reglas
+# DROP al final de una prueba (ver CLEAN_FLAG en sdn_defense.py).
+CLEAN_FLAG = os.path.join(config.RUNTIME_DIR, "defense_clean.flag")
 POLL_INTERVAL = config.POLL_INTERVAL
+
+
+def _clear_clean_flag():
+    if os.path.exists(CLEAN_FLAG):
+        try:
+            os.remove(CLEAN_FLAG)
+        except OSError:
+            pass
+
+
+def _wait_clean(timeout=15):
+    """Espera a que el controlador confirme que ha limpiado las reglas
+    DROP (crea CLEAN_FLAG). Evita hacer el pingAll de recuperación con
+    reglas DROP aún activas."""
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        if os.path.exists(CLEAN_FLAG):
+            return True
+        time.sleep(0.3)
+    return False
 
 # Duración por defecto de cada prueba de tráfico (segundos). 30s da
 # tiempo a capturar suficientes flujos de cada tipo sin alargar en
@@ -226,12 +249,39 @@ def _run_single(net, kind, duration=None, reset=True, plot=True):
     try:
         traffic.GENERATORS[kind](net, duration)
     finally:
-        _set_active(False)  # desactivar y dejar que el controlador limpie los DROP
-        # Espera de recuperación: da tiempo al controlador a retirar las
-        # reglas DROP, reinstalar la table-miss y digerir el aluvión de
-        # flujos (sobre todo tras scanning, que genera cientos). Sin este
-        # margen, la prueba siguiente empezaba con la red aún inestable.
-        time.sleep(4)
+        # Borrar el flag de "limpieza hecha" y desactivar la prueba. El
+        # controlador, al ver el flag desactivado, limpia las reglas DROP
+        # y crea CLEAN_FLAG cuando termina.
+        _clear_clean_flag()
+        _set_active(False)
+        # Matar CUALQUIER proceso de ataque en TODOS los hosts.
+        for h in net.hosts:
+            h.cmd("pkill -9 -f nmap 2>/dev/null; "
+                  "pkill -9 -f hping3 2>/dev/null; "
+                  "pkill -9 -f arp_spoof 2>/dev/null; "
+                  "pkill -9 -f iperf 2>/dev/null")
+        # Dar un margen breve a que el controlador limpie las reglas (ya
+        # no se satura, porque la mitigación es por IP: pocos mensajes).
+        # No es crítico esperar la confirmación: la limpieza se hace en el
+        # controlador en su siguiente sondeo de todas formas.
+        cleaned = _wait_clean(timeout=4)
+
+        if not cleaned:
+            print(
+                "*** AVISO: Ryu no confirmó la limpieza de la prueba "
+                "dentro de los 4 segundos.",
+                flush=True
+            )
+        # Ping LIGERO de recuperación (2 hosts, no los 240 pares): fuerza
+        # que los switches reaprendan y confirma que la red responde.
+        # NO se usa pingAll aquí: si la red quedara bloqueada, 240 pings
+        # con timeout acumulan MINUTOS de cuelgue (llegó a tardar 536s).
+        # Con 2 hosts y timeout corto, el peor caso son 2 segundos.
+        try:
+            h1, h2 = net.hosts[0], net.hosts[1]
+            h1.cmd(f"timeout 2 ping -c 1 -W 1 {h2.IP()} > /dev/null 2>&1")
+        except Exception:
+            pass
     print(f"*** Prueba '{kind}' terminada ({time.time()-t0:.0f}s). "
           f"Eventos en CSV: {_count_events()}", flush=True)
     if plot:

@@ -80,6 +80,27 @@ class LiveClassifier:
             self.model = load_artifact(model_name)
         except FileNotFoundError:
             self.model = load_artifact("random_forest.pkl")
+        # CRÍTICO: forzar n_jobs=1 en el modelo. El Random Forest se
+        # entrenó con n_jobs=-1 (todos los núcleos, vía joblib), y ese
+        # valor queda GUARDADO dentro del .pkl. Al hacer predict() dentro
+        # del controlador Ryu -que usa eventlet con monkey-patching de
+        # threading/multiprocessing-, joblib intenta crear workers
+        # paralelos que entran en DEADLOCK con eventlet: el predict() se
+        # queda colgado para siempre (se veía "MODEL START" sin "MODEL
+        # END"), bloqueando el único hilo del controlador. Con n_jobs=1
+        # no hay paralelismo de joblib y no hay deadlock. Se fuerza aquí,
+        # al cargar, para que funcione SIN tener que reentrenar el modelo.
+        try:
+            self.model.n_jobs = 1
+        except Exception:
+            pass
+        # Confirmación visible en el log del controlador.
+        try:
+            print(f"[live_classifier] modelo cargado ({type(self.model).__name__}), "
+                  f"n_jobs={getattr(self.model, 'n_jobs', '?')} "
+                  f"(forzado a 1 para evitar deadlock joblib/eventlet)", flush=True)
+        except Exception:
+            pass
         self.scaler = load_artifact("scaler.pkl")
         self.selected_features = load_artifact("selected_features.pkl")
         # Índices de las features seleccionadas dentro de FEATURE_ORDER,
@@ -197,6 +218,40 @@ class LiveClassifier:
         infer_ms = (time.perf_counter() - t0) * 1000.0
         label = self.le_y.inverse_transform([pred])[0]
         return label, infer_ms, dict(self._last_window)
+
+    def predict_batch(self, raws, now=None):
+        """Clasifica VARIOS flujos en UNA sola llamada al modelo.
+
+        Es la diferencia entre que el controlador funcione o se atasque:
+        llamar a model.predict() por cada flujo cuesta ~30ms CADA UNO
+        (150 flujos x 5 switches = 22s de trabajo por cada segundo de
+        sondeo -> el controlador se queda minutos atrás y deja de
+        responder). Con una sola llamada sobre la matriz completa,
+        scikit-learn clasifica los 150 en unos pocos milisegundos.
+
+        Las features de ventana se calculan igual, flujo a flujo y en
+        orden (los WindowTracker necesitan secuencia), que es barato; lo
+        caro era la inferencia repetida.
+
+        Devuelve una lista de (label, infer_ms_por_flujo, window_feats),
+        en el mismo orden que 'raws'.
+        """
+        if not raws:
+            return []
+        rows, windows = [], []
+        for raw in raws:
+            # build_feature_row alimenta los WindowTracker y devuelve el
+            # vector ya escalado y recortado a las features seleccionadas.
+            rows.append(self.build_feature_row(raw, now)[0])
+            windows.append(dict(self._last_window))
+        X = np.vstack(rows)
+        t0 = time.perf_counter()
+        preds = self.model.predict(X)
+        total_ms = (time.perf_counter() - t0) * 1000.0
+        labels = self.le_y.inverse_transform(preds)
+        # Tiempo de inferencia repartido por flujo (para las métricas).
+        per_flow_ms = total_ms / len(raws)
+        return [(labels[i], per_flow_ms, windows[i]) for i in range(len(raws))]
 
 
 def _num(v):
