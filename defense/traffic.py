@@ -105,6 +105,7 @@ def ddos_traffic(net, duration):
     time.sleep(duration)
     for a in chosen:
         _kill(a, "hping3")
+    return [a.IP() for a in chosen]   # IPs de los atacantes (para el % justo)
 
 
 def _arp_warmup(attacker, targets):
@@ -150,6 +151,7 @@ def scanning_traffic(net, duration):
             _bg(attacker, f"nmap {flags} {target.IP()}", max_s=6)
         time.sleep(random.uniform(0.5, 1.0))
     _kill(attacker, "nmap", "hping3")
+    return [attacker.IP()]   # IP del atacante (para el % justo)
 
 
 def spoofing_traffic(net, duration):
@@ -167,6 +169,9 @@ def spoofing_traffic(net, duration):
                       f"{attacker.MAC()} {victim_ips}", max_s=int(duration) + 2)
         time.sleep(duration)
         _kill(attacker, "arp_spoof.py")
+        # Actores: el atacante y la identidad suplantada (los flujos que
+        # involucran a estas IPs son el ataque).
+        return [attacker.IP(), impersonated.IP()]
     else:
         victim, fake = random.sample(others, 2)
         port = random.choice([80, 443, 22])
@@ -174,6 +179,8 @@ def spoofing_traffic(net, duration):
                       f"-i u20000 {victim.IP()}", max_s=int(duration) + 2)
         time.sleep(duration)
         _kill(attacker, "hping3")
+        # Actores: el atacante y la IP falsa que usa como origen.
+        return [attacker.IP(), fake.IP()]
 
 
 GENERATORS = {

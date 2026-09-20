@@ -1,5 +1,0 @@
-traffic_phase,inferencia_media_ms,inferencia_min_ms,inferencia_max_ms,inferencia_std_ms
-normal,1.345,0.431,6.438,0.929
-scanning,3.968,1.16,9.804,2.201
-ddos,2.235,0.841,7.343,1.411
-spoofing,4.235,1.444,7.718,1.965

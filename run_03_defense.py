@@ -232,7 +232,7 @@ def _cleanup(controller_proc=None, net=None):
 # --------------------------------------------------------------------- #
 # Pruebas de tráfico
 # --------------------------------------------------------------------- #
-def _run_single(net, kind, duration=None, reset=True, plot=True):
+def _run_single(net, kind, duration=None, reset=True, plot=True, summary=True):
     from defense import traffic, plots
     if reset:
         _reset_all(silent=True)   # borra métricas Y gráficas/tablas anteriores
@@ -246,8 +246,9 @@ def _run_single(net, kind, duration=None, reset=True, plot=True):
           "results/metrics/defense_events.csv)", flush=True)
     _set_active(True, kind)   # activar detección+mitigación SOLO durante la prueba
     t0 = time.time()
+    attackers = []
     try:
-        traffic.GENERATORS[kind](net, duration)
+        attackers = traffic.GENERATORS[kind](net, duration) or []
     finally:
         # Borrar el flag de "limpieza hecha" y desactivar la prueba. El
         # controlador, al ver el flag desactivado, limpia las reglas DROP
@@ -264,14 +265,7 @@ def _run_single(net, kind, duration=None, reset=True, plot=True):
         # no se satura, porque la mitigación es por IP: pocos mensajes).
         # No es crítico esperar la confirmación: la limpieza se hace en el
         # controlador en su siguiente sondeo de todas formas.
-        cleaned = _wait_clean(timeout=4)
-
-        if not cleaned:
-            print(
-                "*** AVISO: Ryu no confirmó la limpieza de la prueba "
-                "dentro de los 4 segundos.",
-                flush=True
-            )
+        _wait_clean(timeout=4)
         # Ping LIGERO de recuperación (2 hosts, no los 240 pares): fuerza
         # que los switches reaprendan y confirma que la red responde.
         # NO se usa pingAll aquí: si la red quedara bloqueada, 240 pings
@@ -284,6 +278,8 @@ def _run_single(net, kind, duration=None, reset=True, plot=True):
             pass
     print(f"*** Prueba '{kind}' terminada ({time.time()-t0:.0f}s). "
           f"Eventos en CSV: {_count_events()}", flush=True)
+    if summary:
+        _print_summary({kind: attackers})   # resumen con % justo sobre el atacante
     if plot:
         # Prueba individual: generar SOLO la gráfica de este tipo.
         try:
@@ -291,6 +287,7 @@ def _run_single(net, kind, duration=None, reset=True, plot=True):
         except Exception as e:
             print(f"*** Aviso: no se pudo generar la gráfica ({e}). "
                   f"Las métricas están en {EVENTS_CSV}.")
+    return attackers
 
 
 def _count_events():
@@ -302,6 +299,62 @@ def _count_events():
         return 0
 
 
+def _print_summary(attackers_by_phase=None):
+    """Imprime por terminal un resumen legible de la detección por tipo
+    de tráfico, leyendo el CSV de eventos.
+
+    Si se pasan los ATACANTES de cada fase (attackers_by_phase: dict
+    fase -> lista de IPs), el porcentaje de detección se calcula SOLO
+    sobre los flujos que involucran al atacante -que son los que
+    realmente son ataque-. Sin ese dato, se calcula sobre todos los
+    flujos de la fase (menos representativo: incluye el tráfico de fondo
+    legítimo que ocurre durante el ataque, que el modelo -bien- clasifica
+    como normal, y que baja artificialmente el porcentaje)."""
+    try:
+        import csv as _csv
+        with open(EVENTS_CSV) as f:
+            rows = list(_csv.DictReader(f))
+    except OSError:
+        return
+    if not rows:
+        return
+
+    attackers_by_phase = attackers_by_phase or {}
+    fases = {}
+    for r in rows:
+        fases.setdefault(r.get("traffic_phase", "?"), []).append(r)
+
+    print("\n" + "=" * 60)
+    print("  RESUMEN DE DETECCIÓN")
+    print("=" * 60)
+    for fase, evs in fases.items():
+        atacantes = set(attackers_by_phase.get(fase, []))
+        if fase == "normal":
+            # Para normal: acierto = clasificado como normal; error = FP.
+            total = len(evs)
+            aciertos = sum(1 for e in evs if e.get("predicted_label") == "normal")
+            fp = total - aciertos
+            pct = aciertos / total * 100 if total else 0
+            print(f"  NORMAL   : {pct:5.1f}% clasificado como normal "
+                  f"| {fp} falsos positivos | {total} flujos")
+        else:
+            # Para ataques: si conocemos al atacante, medir SOLO sobre sus
+            # flujos (los que son de verdad el ataque); si no, sobre todos.
+            if atacantes:
+                flujos_ataque = [e for e in evs
+                                 if e.get("src") in atacantes or e.get("dst") in atacantes]
+            else:
+                flujos_ataque = evs
+            total = len(flujos_ataque)
+            detectados = sum(1 for e in flujos_ataque if e.get("predicted_label") == fase)
+            drops = sum(1 for e in evs if e.get("mitigated") == "1")
+            pct = detectados / total * 100 if total else 0
+            nota = "" if atacantes else " (sobre todo el tráfico de la fase)"
+            print(f"  {fase.upper():9s}: {pct:5.1f}% detectado como {fase} "
+                  f"| {drops} DROP | {total} flujos del ataque{nota}")
+    print("=" * 60 + "\n")
+
+
 def _run_battery(net):
     # La batería es un experimento propio: empieza borrando TODO (métricas
     # y gráficas anteriores) y encadena los 4 tipos SIN resetear ni
@@ -311,14 +364,29 @@ def _run_battery(net):
     # las siguientes.
     _reset_all(silent=True)
     print("\n=== BATERÍA COMPLETA: normal -> scanning -> ddos -> spoofing ===")
+    attackers_by_phase = {}
     for kind in ["normal", "scanning", "ddos", "spoofing"]:
         try:
-            _run_single(net, kind, reset=False, plot=False)
+            attackers_by_phase[kind] = _run_single(
+                net, kind, reset=False, plot=False, summary=False) or []
         except Exception as e:
             print(f"*** Aviso: la fase '{kind}' falló ({e}), continúo con la siguiente.")
             _set_active(False)
         _drain(3)  # dejar que las últimas estadísticas se procesen
     print("\n=== Batería completa terminada. Generando gráficas y tablas... ===")
+    _print_summary(attackers_by_phase)   # resumen final con % justo
+    # Guardar una copia del CSV completo de la batería (con las 4 clases),
+    # para que una prueba individual posterior no lo sobrescriba. Es el
+    # CSV que interesa conservar para la memoria.
+    try:
+        import shutil
+        copia = os.path.join(config.PROJECT_ROOT, "results", "metrics",
+                             "defense_events_bateria.csv")
+        if os.path.exists(EVENTS_CSV):
+            shutil.copy(EVENTS_CSV, copia)
+            print(f"*** Copia de la batería guardada en {copia}")
+    except Exception as e:
+        print(f"*** Aviso: no se pudo guardar la copia de la batería ({e}).")
     _make_plots()
 
 
