@@ -251,3 +251,54 @@ STRUCTURAL_NA_COLUMNS = [
 # eliminan (son pocas, y no tiene sentido imputarlas).
 RATE_COLUMNS = ["packet_count_per_second", "byte_count_per_second", "avg_packet_size"]
 
+
+# --------------------------------------------------------------- #
+# Fase 3: detección y mitigación en vivo
+# (run_03_defense.py, controller/sdn_defense.py, defense/traffic.py)
+# --------------------------------------------------------------- #
+# Duración de cada prueba de tráfico (segundos). 30s da tiempo a
+# capturar suficientes flujos sin alargar en exceso cada prueba.
+DEFENSE_PHASE_DURATION = 30
+# Excepciones por tipo (p.ej. {"scanning": 45}). Vacío: todas las
+# pruebas duran lo mismo. Antes el scanning duraba 45s, por si su firma
+# (muchos flujos activos acumulados) tardaba en consolidarse en vivo;
+# las pruebas reales mostraron que se detecta y mitiga en ~1s, así que
+# no hay motivo para tratarlo distinto -y con la misma duración las
+# cuatro pruebas son directamente comparables-.
+DEFENSE_PHASE_DURATION_BY_KIND = {}
+
+# DDoS con la intensidad "--flood" (sí/no). En la fase 1 se usa; aquí
+# se desactiva porque, con el modelo clasificando en vivo, el flood
+# total satura la CPU y cuelga Mininet. Las otras dos intensidades del
+# dataset (~500 y ~1000 pps) se mantienen.
+DEFENSE_DDOS_ALLOW_FLOOD = False
+
+# Duración de cada regla DROP (segundos). No permanente a propósito: la
+# red nunca queda bloqueada por reglas residuales y, si el ataque sigue,
+# se vuelve a detectar y a bloquear (como un IDS/IPS que re-evalúa).
+DEFENSE_DROP_TIMEOUT = 20
+
+# Nº de sondeos DISTINTOS en los que una conversación (MAC origen ->
+# MAC destino) debe clasificarse como ataque, dentro de
+# DEFENSE_CONFIRM_WINDOW_S segundos, antes de bloquearla. Con 1, un
+# fallo puntual del modelo corta una conversación legítima; con 2, un
+# error aislado no basta y un ataque real (sostenido) se confirma en
+# ~1-2 s.
+DEFENSE_MITIGATION_CONFIRMATIONS = 2
+DEFENSE_CONFIRM_WINDOW_S = 5
+
+# Margen tras activar una prueba durante el que el controlador descarta
+# las estadísticas recibidas: las que ya venían en camino traen flujos
+# de ANTES de la prueba. Equivale a dos sondeos más medio segundo.
+DEFENSE_ACTIVATION_GRACE_S = 2 * POLL_INTERVAL + 0.5
+
+# Nº de veces que se repite la batería completa (opción 5 del menú). Cada
+# batería elige al azar atacantes, víctimas y VARIANTES de cada ataque
+# (DDoS SYN/UDP/ICMP con dos intensidades, spoofing ARP o IP...), y la
+# dificultad cambia mucho entre variantes: en dos baterías reales, el
+# F1 macro fue 0.567 (DDoS SYN + IP spoofing) y 0.740 (DDoS UDP + ARP
+# spoofing). Una sola ejecución es UNA muestra; repitiéndola se informa
+# la media y la desviación entre ejecuciones, igual que la fase 2 informa
+# la desviación entre las particiones de GroupKFold. Con 10 cada variante
+# aparece varias veces (~25 min en total); 5 sirve para pruebas (~12 min).
+DEFENSE_BATTERY_RUNS = 10

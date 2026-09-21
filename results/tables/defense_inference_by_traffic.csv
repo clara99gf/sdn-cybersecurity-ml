@@ -1,0 +1,5 @@
+traffic_phase,inference_mean_ms,inference_min_ms,inference_max_ms,inference_std_ms
+normal,2.355,0.939,26.511,2.454
+scanning,0.774,0.21,7.563,1.196
+ddos,1.975,1.167,7.093,1.02
+spoofing,2.232,0.623,8.494,1.928

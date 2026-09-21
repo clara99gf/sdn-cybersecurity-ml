@@ -66,7 +66,7 @@ y abre un menú:
 | Opción | Qué hace |
 |---|---|
 | 1-4 | Prueba individual de 30 s con un solo tipo de tráfico (normal, scanning, ddos o spoofing): resumen en terminal y su gráfica |
-| 5 | Batería completa: los cuatro tipos seguidos, repetidos `DEFENSE_BATTERY_RUNS` veces (10 por defecto, unos 25 minutos). Resumen global con F1 y recall macro (media ± desviación entre ejecuciones), todas las gráficas y las tablas |
+| 5 | Batería completa: los cuatro tipos seguidos, con resumen global (F1 macro), todas las gráficas y las tablas |
 | 6 | Salir limpiando el entorno |
 
 Cada opción borra los resultados anteriores de la fase 3. La duración de
@@ -79,13 +79,10 @@ Resultados:
   (predicción, etiqueta real, inferencia, latencia, CPU, DROP).
 - `results/metrics/defense_events_battery.csv`: copia de la última
   batería, que no se sobrescribe con las pruebas individuales.
-- `results/figures/defense/`: gráficas por tipo de tráfico y de CPU
-  frente a latencia (de la última ejecución de la batería) y matriz de
-  confusión en vivo (de todas las ejecuciones).
-- `results/tables/`: `defense_detection_by_class.csv` (precision, recall
-  y F1 por clase), `defense_battery_runs.csv` (métricas de cada
-  ejecución, con media y desviación), `defense_cpu_latency_by_traffic.csv`
-  y `defense_inference_by_traffic.csv`.
+- `results/figures/defense/`: gráficas por tipo de tráfico, CPU frente a
+  latencia y matriz de confusión en vivo.
+- `results/tables/defense_*.csv`: detección por clase, CPU y latencia,
+  tiempos de inferencia.
 
 Para regenerar gráficas y tablas desde un CSV ya recogido, sin volver a
 lanzar la red:

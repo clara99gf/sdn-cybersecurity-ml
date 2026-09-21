@@ -1,0 +1,6 @@
+class,flows,precision,recall,f1,active_flows,precision_active,recall_active,f1_active,first_mitigation_s,drops
+normal,396,0.465,0.934,0.621,153,0.614,0.948,0.746,,6
+scanning,792,0.974,0.564,0.715,167,0.971,0.611,0.75,1.0,31
+ddos,226,0.862,0.664,0.75,61,0.95,0.623,0.752,1.0,8
+spoofing,228,0.902,0.846,0.873,37,0.757,0.757,0.757,1.0,12
+macro_avg,1642,0.801,0.752,0.74,418,0.823,0.735,0.751,,57

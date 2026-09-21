@@ -8,9 +8,11 @@ Menú interactivo en terminal que permite:
   - Lanzar tráfico de UN tipo (normal / ddos / scanning / spoofing) y ver
     cómo el controlador lo detecta y mitiga en vivo.
   - Lanzar la BATERÍA COMPLETA: los cuatro tipos en secuencia, con estado
-    limpio entre cada uno, y generar todas las gráficas al final.
-  - Generar las gráficas a partir de las métricas ya recogidas.
+    limpio entre cada uno, y generar todas las gráficas y tablas al final.
   - Salir limpiando el entorno (mn -c, matar Ryu).
+
+Para regenerar gráficas y tablas a partir de un CSV ya recogido (sin
+volver a lanzar la red): venv/bin/python3 defense/plots.py [csv]
 
 Levanta por su cuenta el controlador de defensa (controller/sdn_defense.py)
 y la topología Mininet, igual que run_01_dataset.py hace con la de
@@ -37,6 +39,11 @@ ACTIVE_FLAG = os.path.join(config.RUNTIME_DIR, "defense_active.flag")
 # Flag que el controlador crea cuando ha terminado de limpiar las reglas
 # DROP al final de una prueba (ver CLEAN_FLAG en sdn_defense.py).
 CLEAN_FLAG = os.path.join(config.RUNTIME_DIR, "defense_clean.flag")
+# Flag que el controlador crea cuando, tras activar una prueba, ya ha
+# vaciado las tablas y descartado las estadísticas "viejas" (ver
+# READY_FLAG y ACTIVATION_GRACE_S en sdn_defense.py). El tráfico no se
+# lanza hasta entonces.
+READY_FLAG = os.path.join(config.RUNTIME_DIR, "defense_ready.flag")
 POLL_INTERVAL = config.POLL_INTERVAL
 
 
@@ -46,6 +53,36 @@ def _clear_clean_flag():
             os.remove(CLEAN_FLAG)
         except OSError:
             pass
+
+
+def _remove(path):
+    if os.path.exists(path):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def _wait_ready(timeout=10):
+    """Espera a que el controlador confirme que ha empezado a clasificar
+    con las tablas limpias (crea READY_FLAG)."""
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        if os.path.exists(READY_FLAG):
+            return True
+        time.sleep(0.2)
+    return False
+
+
+def _reset_label_file():
+    """Deja LABEL_FILE en "normal" antes de cada prueba. traffic_generator
+    lo reescribe con set_label() (etiqueta + actores) igual que en el
+    dataset, y el controlador lo usa para calcular la etiqueta REAL de
+    cada flujo. Así, lo que ocurra antes del set_label de la prueba (p.ej.
+    el warmup ARP del scanning) cuenta como normal, no hereda la etiqueta
+    de la prueba anterior."""
+    with open(config.LABEL_FILE, "w") as f:
+        f.write("normal,0,")
 
 
 def _wait_clean(timeout=15):
@@ -59,33 +96,23 @@ def _wait_clean(timeout=15):
         time.sleep(0.3)
     return False
 
-# Duración por defecto de cada prueba de tráfico (segundos). 30s da
-# tiempo a capturar suficientes flujos de cada tipo sin alargar en
-# exceso.
-PHASE_DURATION = 30
-
-# Duraciones específicas por tipo cuando conviene apartarse del valor por
-# defecto. El scanning necesita más tiempo: su firma es "muchos flujos
-# activos acumulados" (flow_count_per_dpid alto), que en vivo tarda en
-# consolidarse -un escaneo real es sostenido, así que darle más tiempo
-# es más realista-. Este diccionario lo usan TANTO las pruebas
-# individuales COMO la batería (ambas pasan por _run_single), así que
-# ajustar aquí basta para los dos casos.
-PHASE_DURATION_BY_KIND = {
-    "scanning": 45,
-}
+# Duración de cada prueba: definida en config.py (sección "Fase 3").
+PHASE_DURATION = config.DEFENSE_PHASE_DURATION
+PHASE_DURATION_BY_KIND = config.DEFENSE_PHASE_DURATION_BY_KIND
 
 
-def _set_active(active, kind=""):
+def _set_active(active, kind="", run=1):
     """Activa (crea) o desactiva (borra) el flag que le dice al
     controlador que clasifique y mitigue. El flag contiene el TIPO de
     prueba en marcha (normal/scanning/ddos/spoofing), que el controlador
     guarda en cada evento (columna traffic_phase) -así las gráficas y
     tablas separan por prueba aunque los tiempos se solapen-.
-    Fuera de una prueba, el controlador no toca el tráfico."""
+    Fuera de una prueba, el controlador no toca el tráfico.
+    Contiene "tipo|ejecución": la ejecución numera las repeticiones de la
+    batería (columna run del CSV de eventos)."""
     if active:
         with open(ACTIVE_FLAG, "w") as f:
-            f.write(kind)
+            f.write(f"{kind}|{run}")
     elif os.path.exists(ACTIVE_FLAG):
         os.remove(ACTIVE_FLAG)
 
@@ -185,6 +212,10 @@ def _build_net():
         for intf in node.intfNames():
             if intf != "lo":
                 node.cmd(f"ethtool -K {intf} tso off gso off gro off 2>/dev/null")
+                # Igual que topology.py en la fase 1 (antes faltaba aquí):
+                # afecta al tamaño de los segmentos TCP y, con ello, a
+                # byte_count / avg_packet_size.
+                node.cmd(f"ip link set dev {intf} gso_max_size 1514 2>/dev/null")
     # Esperar a que los 5 switches se conecten al controlador (igual que
     # topology.py en la fase 1: 5s). Con menos tiempo, algún switch aún no
     # tiene la regla table-miss instalada cuando empieza el tráfico, y sus
@@ -207,6 +238,13 @@ def _build_net():
     with open(config.HOST_IDENTITY_FILE, "w") as f:
         for host in net.hosts:
             f.write(f"{host.IP()},{host.MAC()}\n")
+    # Igual que la fase 1 (STARTUP_SETTLE_SECONDS en generate_dataset):
+    # dejar que expiren los flujos del pingAll antes de la primera prueba.
+    # En el dataset ese tráfico queda como "warmup" y se descarta al
+    # entrenar; aquí se clasificaba como si fuera la prueba.
+    print(f"*** Esperando {config.STARTUP_SETTLE_SECONDS}s a que expiren los "
+          f"flujos del pingAll...")
+    time.sleep(config.STARTUP_SETTLE_SECONDS)
     return net
 
 
@@ -232,7 +270,7 @@ def _cleanup(controller_proc=None, net=None):
 # --------------------------------------------------------------------- #
 # Pruebas de tráfico
 # --------------------------------------------------------------------- #
-def _run_single(net, kind, duration=None, reset=True, plot=True, summary=True):
+def _run_single(net, kind, duration=None, reset=True, plot=True, summary=True, run=1):
     from defense import traffic, plots
     if reset:
         _reset_all(silent=True)   # borra métricas Y gráficas/tablas anteriores
@@ -244,33 +282,26 @@ def _run_single(net, kind, duration=None, reset=True, plot=True, summary=True):
     print(f"\n*** Generando tráfico '{kind}' durante {duration}s...", flush=True)
     print("    (el controlador clasifica y mitiga en vivo; métricas -> "
           "results/metrics/defense_events.csv)", flush=True)
-    _set_active(True, kind)   # activar detección+mitigación SOLO durante la prueba
+    _reset_label_file()
+    _remove(READY_FLAG)
+    _set_active(True, kind, run)   # activar detección+mitigación SOLO durante la prueba
+    if not _wait_ready():
+        print("*** Aviso: el controlador no confirmó que estuviera listo; "
+              "lanzo el tráfico igualmente (revisa logs/ryu_defense.log).")
     t0 = time.time()
     attackers = []
     try:
         attackers = traffic.GENERATORS[kind](net, duration) or []
     finally:
-        # Borrar el flag de "limpieza hecha" y desactivar la prueba. El
-        # controlador, al ver el flag desactivado, limpia las reglas DROP
-        # y crea CLEAN_FLAG cuando termina.
+        # El controlador, al ver el flag desactivado, vuelca los eventos,
+        # limpia las reglas y crea CLEAN_FLAG.
         _clear_clean_flag()
         _set_active(False)
-        # Matar CUALQUIER proceso de ataque en TODOS los hosts.
-        for h in net.hosts:
-            h.cmd("pkill -9 -f nmap 2>/dev/null; "
-                  "pkill -9 -f hping3 2>/dev/null; "
-                  "pkill -9 -f arp_spoof 2>/dev/null; "
-                  "pkill -9 -f iperf 2>/dev/null")
-        # Dar un margen breve a que el controlador limpie las reglas (ya
-        # no se satura, porque la mitigación es por IP: pocos mensajes).
-        # No es crítico esperar la confirmación: la limpieza se hace en el
-        # controlador en su siguiente sondeo de todas formas.
+        traffic.kill_all_attack_procs(net)
+        _reset_label_file()
         _wait_clean(timeout=4)
-        # Ping LIGERO de recuperación (2 hosts, no los 240 pares): fuerza
-        # que los switches reaprendan y confirma que la red responde.
-        # NO se usa pingAll aquí: si la red quedara bloqueada, 240 pings
-        # con timeout acumulan MINUTOS de cuelgue (llegó a tardar 536s).
-        # Con 2 hosts y timeout corto, el peor caso son 2 segundos.
+        # Ping LIGERO de recuperación (no pingAll: si la red quedara
+        # bloqueada, 240 pings con timeout acumulan minutos).
         try:
             h1, h2 = net.hosts[0], net.hosts[1]
             h1.cmd(f"timeout 2 ping -c 1 -W 1 {h2.IP()} > /dev/null 2>&1")
@@ -278,8 +309,10 @@ def _run_single(net, kind, duration=None, reset=True, plot=True, summary=True):
             pass
     print(f"*** Prueba '{kind}' terminada ({time.time()-t0:.0f}s). "
           f"Eventos en CSV: {_count_events()}", flush=True)
+    if attackers:
+        print(f"    Actores de la prueba: {', '.join(attackers)}")
     if summary:
-        _print_summary({kind: attackers})   # resumen con % justo sobre el atacante
+        _print_summary()
     if plot:
         # Prueba individual: generar SOLO la gráfica de este tipo.
         try:
@@ -299,89 +332,128 @@ def _count_events():
         return 0
 
 
-def _print_summary(attackers_by_phase=None):
-    """Imprime por terminal un resumen legible de la detección por tipo
-    de tráfico, leyendo el CSV de eventos.
+def _print_summary():
+    """Resumen de la detección, calculado con la ETIQUETA REAL de cada
+    flujo (columna true_label, que el controlador calcula con el mismo
+    criterio que el dataset: un flujo es ataque si involucra a un actor
+    de la prueba). Así se mide lo mismo que en la validación de la fase 2.
 
-    Si se pasan los ATACANTES de cada fase (attackers_by_phase: dict
-    fase -> lista de IPs), el porcentaje de detección se calcula SOLO
-    sobre los flujos que involucran al atacante -que son los que
-    realmente son ataque-. Sin ese dato, se calcula sobre todos los
-    flujos de la fase (menos representativo: incluye el tráfico de fondo
-    legítimo que ocurre durante el ataque, que el modelo -bien- clasifica
-    como normal, y que baja artificialmente el porcentaje)."""
+    Se agrupa por CLASE REAL (no por prueba), con los mismos cálculos que
+    results/tables/defense_detection_by_class.csv, para que la terminal y
+    la tabla den siempre las mismas cifras. Si la batería se repitió, se
+    suman todas las ejecuciones.
+      - normal: % de flujos normales clasificados como normal, falsos
+        positivos y DROP aplicados sobre tráfico normal.
+      - ataques: recall (de los flujos que SON ese ataque, cuántos se
+        detectan), tiempo hasta la primera mitigación (desde el primer
+        flujo del ataque visto por el controlador hasta el primer DROP
+        sobre ese ataque, media entre ejecuciones; con 2 confirmaciones y
+        un sondeo por segundo el mínimo posible es ~1 s) y nº de DROP.
+    La precisión y el F1 van en el bloque global: solo tienen sentido con
+    las cuatro clases juntas (batería).
+    """
+    import pandas as pd
     try:
-        import csv as _csv
-        with open(EVENTS_CSV) as f:
-            rows = list(_csv.DictReader(f))
-    except OSError:
+        df = pd.read_csv(EVENTS_CSV)
+    except (OSError, pd.errors.EmptyDataError):
         return
-    if not rows:
+    if df.empty or "true_label" not in df.columns:
+        print("*** (no hay eventos con etiqueta real en el CSV)")
         return
+    if "run" not in df.columns:
+        df["run"] = 1
+    df["t"] = pd.to_datetime(df["timestamp"])
+    n_runs = df["run"].nunique()
 
-    attackers_by_phase = attackers_by_phase or {}
-    fases = {}
-    for r in rows:
-        fases.setdefault(r.get("traffic_phase", "?"), []).append(r)
-
-    print("\n" + "=" * 60)
-    print("  RESUMEN DE DETECCIÓN")
-    print("=" * 60)
-    for fase, evs in fases.items():
-        atacantes = set(attackers_by_phase.get(fase, []))
-        if fase == "normal":
-            # Para normal: acierto = clasificado como normal; error = FP.
-            total = len(evs)
-            aciertos = sum(1 for e in evs if e.get("predicted_label") == "normal")
-            fp = total - aciertos
-            pct = aciertos / total * 100 if total else 0
-            print(f"  NORMAL   : {pct:5.1f}% clasificado como normal "
-                  f"| {fp} falsos positivos | {total} flujos")
+    print("\n" + "=" * 72)
+    titulo = "RESUMEN DE DETECCIÓN (sobre la etiqueta real de cada flujo)"
+    if n_runs > 1:
+        titulo += f" - {n_runs} ejecuciones"
+    print("  " + titulo)
+    print("=" * 72)
+    for clase in ["normal", "scanning", "ddos", "spoofing"]:
+        reales = df[df["true_label"] == clase]
+        if reales.empty:
+            continue
+        ok = int((reales["predicted_label"] == clase).sum())
+        recall = ok / len(reales) * 100
+        drops = int((reales["mitigated"] == 1).sum())
+        if clase == "normal":
+            print(f"  {clase.upper():9s}: {recall:5.1f}% clasificado como normal | "
+                  f"{len(reales) - ok} falsos positivos | {len(reales)} flujos")
+            print(f"             DROP sobre tráfico normal: {drops}")
+            continue
+        print(f"  {clase.upper():9s}: recall {recall:5.1f}% | {len(reales)} flujos de ataque "
+              f"| {drops} DROP")
+        tiempos = []
+        for _, g in reales.groupby("run"):
+            m = g[g["mitigated"] == 1]
+            if len(m):
+                tiempos.append((m["t"].min() - g["t"].min()).total_seconds())
+        if tiempos:
+            extra = (f" (en {len(tiempos)} de {reales['run'].nunique()} ejecuciones)"
+                     if n_runs > 1 else "")
+            print(f"             primera mitigación a los {sum(tiempos) / len(tiempos):.1f}s "
+                  f"del primer flujo del ataque{extra}")
         else:
-            # Para ataques: si conocemos al atacante, medir SOLO sobre sus
-            # flujos (los que son de verdad el ataque); si no, sobre todos.
-            if atacantes:
-                flujos_ataque = [e for e in evs
-                                 if e.get("src") in atacantes or e.get("dst") in atacantes]
-            else:
-                flujos_ataque = evs
-            total = len(flujos_ataque)
-            detectados = sum(1 for e in flujos_ataque if e.get("predicted_label") == fase)
-            drops = sum(1 for e in evs if e.get("mitigated") == "1")
-            pct = detectados / total * 100 if total else 0
-            nota = "" if atacantes else " (sobre todo el tráfico de la fase)"
-            print(f"  {fase.upper():9s}: {pct:5.1f}% detectado como {fase} "
-                  f"| {drops} DROP | {total} flujos del ataque{nota}")
-    print("=" * 60 + "\n")
+            print("             sin mitigación del ataque")
+
+    if {"normal", "scanning", "ddos", "spoofing"} <= set(df["true_label"]):
+        try:
+            from sklearn.metrics import f1_score, precision_score, recall_score
+            labels = ["normal", "scanning", "ddos", "spoofing"]
+
+            def macro(g, fn):
+                return fn(g["true_label"], g["predicted_label"], labels=labels,
+                          average="macro", zero_division=0)
+            print("-" * 72)
+            print(f"  GLOBAL   : F1 macro {macro(df, f1_score):.3f} | precisión macro "
+                  f"{macro(df, precision_score):.3f} | recall macro "
+                  f"{macro(df, recall_score):.3f}")
+            completas = [g for _, g in df.groupby("run")
+                         if set(labels) <= set(g["traffic_phase"])]
+            if len(completas) > 1:
+                for nombre, fn in [("F1 macro", f1_score), ("recall macro", recall_score)]:
+                    vals = [macro(g, fn) for g in completas]
+                    media = sum(vals) / len(vals)
+                    std = (sum((x - media) ** 2 for x in vals) / len(vals)) ** 0.5
+                    print(f"             {nombre} por ejecución: media {media:.3f} ± {std:.3f} "
+                          f"(mín {min(vals):.3f}, máx {max(vals):.3f})")
+            print("             detalle: results/tables/defense_detection_by_class.csv"
+                  + (" y defense_battery_runs.csv" if len(completas) > 1 else ""))
+        except Exception as e:
+            print(f"  (no se pudieron calcular las métricas globales: {e})")
+    print("=" * 72 + "\n")
 
 
 def _run_battery(net):
     # La batería es un experimento propio: empieza borrando TODO (métricas
     # y gráficas anteriores) y encadena los 4 tipos SIN resetear ni
     # graficar entre ellos (plot=False), para que el CSV final contenga
-    # las 4 clases. Al terminar genera TODAS las gráficas + las tablas.
-    # Cada fase va en su try/except para que un fallo en una no impida
-    # las siguientes.
+    # las 4 clases. Se repite config.DEFENSE_BATTERY_RUNS veces (cada
+    # repetición queda numerada en la columna run del CSV). Al terminar
+    # genera TODAS las gráficas + las tablas. Cada prueba va en su
+    # try/except para que un fallo en una no impida las siguientes.
     _reset_all(silent=True)
-    print("\n=== BATERÍA COMPLETA: normal -> scanning -> ddos -> spoofing ===")
-    attackers_by_phase = {}
-    for kind in ["normal", "scanning", "ddos", "spoofing"]:
-        try:
-            attackers_by_phase[kind] = _run_single(
-                net, kind, reset=False, plot=False, summary=False) or []
-        except Exception as e:
-            print(f"*** Aviso: la fase '{kind}' falló ({e}), continúo con la siguiente.")
-            _set_active(False)
-        _drain(3)  # dejar que las últimas estadísticas se procesen
-    print("\n=== Batería completa terminada. Generando gráficas y tablas... ===")
-    _print_summary(attackers_by_phase)   # resumen final con % justo
+    n_runs = max(1, int(getattr(config, "DEFENSE_BATTERY_RUNS", 1)))
+    for run in range(1, n_runs + 1):
+        print(f"\n=== BATERÍA {run}/{n_runs}: normal -> scanning -> ddos -> spoofing ===")
+        for kind in ["normal", "scanning", "ddos", "spoofing"]:
+            try:
+                _run_single(net, kind, reset=False, plot=False, summary=False, run=run)
+            except Exception as e:
+                print(f"*** Aviso: la prueba '{kind}' falló ({e}), continúo con la siguiente.")
+                _set_active(False)
+            _drain(3)  # dejar que las últimas estadísticas se procesen
+    print("\n=== Batería terminada. Generando gráficas y tablas... ===")
+    _print_summary()
     # Guardar una copia del CSV completo de la batería (con las 4 clases),
     # para que una prueba individual posterior no lo sobrescriba. Es el
     # CSV que interesa conservar para la memoria.
     try:
         import shutil
         copia = os.path.join(config.PROJECT_ROOT, "results", "metrics",
-                             "defense_events_bateria.csv")
+                             "defense_events_battery.csv")
         if os.path.exists(EVENTS_CSV):
             shutil.copy(EVENTS_CSV, copia)
             print(f"*** Copia de la batería guardada en {copia}")
@@ -431,7 +503,7 @@ def _reset_all(silent=False):
 # --------------------------------------------------------------------- #
 # Menú
 # --------------------------------------------------------------------- #
-MENU = """
+MENU = f"""
 ============================================================
   FASE 3 - DETECCIÓN Y MITIGACIÓN (menú)
 ============================================================
@@ -442,7 +514,8 @@ MENU = """
   2) Tráfico SCANNING -> genera su gráfica
   3) Tráfico DDOS     -> genera su gráfica
   4) Tráfico SPOOFING -> genera su gráfica
-  5) BATERÍA COMPLETA -> genera las 4 gráficas + CPU/latencia + tablas
+  5) BATERÍA COMPLETA -> los 4 tipos, {config.DEFENSE_BATTERY_RUNS} veces seguidas
+                         (DEFENSE_BATTERY_RUNS en config.py): gráficas y tablas
   6) Salir (limpia el entorno: mn -c)
 ============================================================
 """
@@ -455,6 +528,11 @@ def main():
 
     subprocess.run(["mn", "-c"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     _set_active(False)  # asegurar que no queda un flag de una ejecución anterior
+    _remove(READY_FLAG)
+    _clear_clean_flag()
+    _reset_label_file()
+    from defense import traffic
+    traffic.reset_log()
     controller_proc = _start_controller()
     net = None
     try:

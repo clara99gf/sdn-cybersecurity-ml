@@ -65,6 +65,23 @@ LOG_FILE = config.TRAFFIC_LOG_FILE
 SETTLE = config.PHASE_SETTLE_SECONDS
 MAX_ROWS_PER_PHASE = config.MAX_ROWS_PER_PHASE
 
+# --------------------------------------------------------------- #
+# Reutilización desde la fase 3 (defense/traffic.py)
+# --------------------------------------------------------------- #
+# La fase de detección y mitigación llama a ESTAS MISMAS funciones de
+# tráfico (normal_traffic, scanning_traffic...) en vez de tener un
+# generador propio: así el tráfico que ve el modelo en vivo es
+# idéntico al del dataset, sin riesgo de que ambos diverjan.
+#
+# ENFORCE_ROW_CAP: en la generación del dataset (True) cada fase se
+# corta al superar MAX_ROWS_PER_PHASE filas del CSV. En la fase 3 no
+# hay CSV del dataset creciendo, y contar sus 300.000 filas cada 0,3s
+# sería un desperdicio -defense/traffic.py lo pone a False-.
+#
+# Además, cada función de fase DEVUELVE sus actores (las mismas IPs que
+# pasa a set_label()). generate_dataset() ignora ese valor; la fase 3
+# lo usa para saber quién atacó a quién.
+ENFORCE_ROW_CAP = True
 
 _phase_counter = 0
 
@@ -113,6 +130,8 @@ def _settle():
 
 def _count_csv_rows():
     """Nº de filas de datos en el CSV (sin contar la cabecera)."""
+    if not ENFORCE_ROW_CAP:
+        return 0
     try:
         with open(config.CSV_FILE) as f:
             return max(sum(1 for _ in f) - 1, 0)
@@ -122,7 +141,7 @@ def _count_csv_rows():
 
 def _cap_exceeded(baseline_rows):
     """True si la fase actual ya ha generado MAX_ROWS_PER_PHASE filas propias."""
-    if not MAX_ROWS_PER_PHASE:
+    if not ENFORCE_ROW_CAP or not MAX_ROWS_PER_PHASE:
         return False
     return (_count_csv_rows() - baseline_rows) >= MAX_ROWS_PER_PHASE
 
@@ -281,6 +300,7 @@ def normal_traffic(net, duration):
     os.system("pkill -9 -f iperf 2>/dev/null")
     os.system("pkill -9 -f ping 2>/dev/null")
     _settle()
+    return []
 
 
 # ------------------------------------------------------------------ #
@@ -311,7 +331,8 @@ def scanning_traffic(net, duration):
     # fondo, y debe quedar como normal. _label_for_flow comprueba tanto
     # origen como destino, así que con el atacante basta para capturar
     # sus sondas (él es el origen) y sus respuestas (él es el destino).
-    set_label("scanning", actors=[attacker.IP()])
+    actors = [attacker.IP()]
+    set_label("scanning", actors=actors)
     baseline = _count_csv_rows()
     end_time = time.time() + duration
 
@@ -362,6 +383,7 @@ def scanning_traffic(net, duration):
     attacker.cmd("pkill -9 -f nmap 2>/dev/null")
     attacker.cmd("pkill -9 -f hping3 2>/dev/null")
     _settle()
+    return actors
 
 
 # ------------------------------------------------------------------ #
@@ -396,10 +418,12 @@ def spoofing_traffic(net, duration):
         _arp_spoofing(net, duration, baseline, attacker, victims, impersonated)
     else:
         victim, fake_source = random.sample(others, 2)
-        set_label("spoofing", actors=[attacker.IP(), victim.IP(), fake_source.IP()])
+        actors = [attacker.IP(), victim.IP(), fake_source.IP()]
+        set_label("spoofing", actors=actors)
         baseline = _count_csv_rows()
         _ip_spoofing(net, duration, baseline, attacker, victim, fake_source)
     _settle()
+    return actors
 
 
 def _arp_spoofing(net, duration, baseline, attacker, victims, impersonated):
@@ -437,10 +461,14 @@ def _ip_spoofing(net, duration, baseline, attacker, victim, fake_source):
 # ------------------------------------------------------------------ #
 # Fase: ddos
 # ------------------------------------------------------------------ #
-def ddos_traffic(net, duration):
+def ddos_traffic(net, duration, allow_flood=True):
     """
     Ejecuta ataques de denegación de servicio distribuidos usando múltiples atacantes.
     Alterna vectores de ataque (SYN, UDP, ICMP) e intensidades (flood o tasa limitada).
+
+    allow_flood=False excluye la intensidad "--flood" (la usa la fase 3:
+    con el modelo clasificando en vivo, el flood total satura la CPU y
+    cuelga Mininet). La generación del dataset la deja en True.
     """
     hosts = net.hosts
     victim = random.choice(hosts)
@@ -450,14 +478,18 @@ def ddos_traffic(net, duration):
     _kill_all_attack_tools()
     _arp_warmup(net, victim, chosen_attackers)  # y en el sentido inverso también
 
-    set_label("ddos", actors=[victim.IP()] + [a.IP() for a in chosen_attackers])
+    actors = [victim.IP()] + [a.IP() for a in chosen_attackers]
+    set_label("ddos", actors=actors)
     baseline = _count_csv_rows()
 
     flood_type = random.choice(["--syn", "--udp", "--icmp"])
     # Tres intensidades en vez de dos: un punto intermedio entre el
     # "flood" máximo y el "rate_limited" original (~500pps), para que
     # el espectro de intensidad no sean solo dos extremos.
-    intensity = random.choice(["flood", "rate_limited", "rate_limited_fast"])
+    intensities = ["rate_limited", "rate_limited_fast"]
+    if allow_flood:
+        intensities.insert(0, "flood")
+    intensity = random.choice(intensities)
     rate_flag = {
         "flood": "--flood",
         "rate_limited": "-i u2000",       # ~500 pps
@@ -483,6 +515,7 @@ def ddos_traffic(net, duration):
         _kill_pid(a, pid)
         a.cmd("pkill -9 -f hping3 2>/dev/null")
     _settle()
+    return actors
 
 
 # ------------------------------------------------------------------ #

@@ -109,6 +109,17 @@ class LiveClassifier:
         self._selected_idx = [FEATURE_ORDER.index(f) for f in self.selected_features]
         self.encoders = load_artifact("encoders.pkl")
         self.le_y = load_artifact("le_y.pkl")
+        # Tablas valor -> código para las categóricas, indexadas por el
+        # valor NUMÉRICO (ver _encode_categorical para el porqué).
+        self._cat_maps = {}
+        for col, le in self.encoders.items():
+            m = {}
+            for i, c in enumerate(le.classes_):
+                try:
+                    m[float(c)] = i
+                except (TypeError, ValueError):
+                    pass
+            self._cat_maps[col] = m
 
         # WindowTrackers en vivo (mismos que preprocessing.py, ver allí
         # el porqué de cada clave/valor).
@@ -121,17 +132,31 @@ class LiveClassifier:
 
     # -- codificación de categóricas igual que en el preprocesado -------
     def _encode_categorical(self, col, value):
-        """Aplica el LabelEncoder entrenado. Si aparece una categoría no
-        vista en entrenamiento, usa 0 (clase más frecuente aprox.) en
-        vez de fallar -robusto ante variantes nuevas en detección-."""
-        le = self.encoders.get(col)
-        if le is None:
-            return value
-        s = str(value)
-        classes = list(le.classes_)
-        if s in classes:
-            return int(le.transform([s])[0])
-        return 0
+        """Aplica la MISMA codificación que el LabelEncoder del
+        preprocesado.
+
+        Ojo con el detalle (era un bug grave): en el CSV del dataset,
+        ip_proto / arp_opcode / tcp_flags tienen huecos (NaN), así que
+        pandas los lee como float y el LabelEncoder aprendió las clases
+        como texto "6.0", "1.0", "2.0"... En vivo llegan como enteros, y
+        str(6) = "6" no coincidía con "6.0": TODA categoría acababa
+        codificada como la clase 0 (el modelo veía todos los flujos IP
+        "sin protocolo", todos los ARP con el mismo opcode y tcp_flags
+        siempre a 0). Comparando por valor numérico no hay ambigüedad.
+
+        Huecos (None/"") -> 0.0, igual que el fillna(0) del preprocesado.
+        Una categoría nunca vista en entrenamiento se trata también como
+        0.0 ("no aplica") en vez de fallar."""
+        m = self._cat_maps.get(col)
+        if m is None:
+            return _num(value)
+        try:
+            v = 0.0 if value in (None, "") else float(value)
+        except (TypeError, ValueError):
+            v = 0.0
+        if v in m:
+            return m[v]
+        return m.get(0.0, 0)
 
     def _window_features(self, src_id, dst_id, dst_port, now):
         """Calcula las 4 features de ventana temporal alimentando los
@@ -156,8 +181,12 @@ class LiveClassifier:
         """
         now = now if now is not None else time.time()
 
-        # Identificadores para las ventanas (IP o, si es ARP, la IP ARP).
-        src_id = raw.get("ip_src") or raw.get("arp_spa") or "?"
+        # Identificadores para las ventanas, con el MISMO criterio que
+        # preprocessing.py: origen = ip_src y, si no hay (ARP), la MAC
+        # origen (eth_src) -NO arp_spa: antes se usaba la IP ARP y las
+        # 4 features de ventana de todo el ARP se calculaban con claves
+        # distintas a las del entrenamiento-. Destino = ip_dst o arp_tpa.
+        src_id = raw.get("ip_src") or raw.get("eth_src") or "?"
         dst_id = raw.get("ip_dst") or raw.get("arp_tpa") or "?"
         dst_port = raw.get("tcp_dst_port")
         if dst_port is None:
