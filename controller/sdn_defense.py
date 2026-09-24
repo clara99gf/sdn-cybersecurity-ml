@@ -16,7 +16,7 @@ CSV etiquetado para entrenar), este controlador:
      clasifica como ataque de forma repetida, instala en TODOS los
      switches una regla OpenFlow de prioridad alta y acción DROP para
      ese par (ver _mitigate para el porqué de hacerlo así).
-  4. Registra métricas en results/metrics/defense_events.csv: por cada
+  4. Registra métricas en results/events/defense_events.csv: por cada
      flujo evaluado guarda la predicción, la etiqueta REAL (calculada con
      el mismo criterio que el dataset), el tiempo de inferencia, la
      latencia del plano de control y si se aplicó DROP.
@@ -100,9 +100,9 @@ ACTIVATION_GRACE_S = config.DEFENSE_ACTIVATION_GRACE_S
 # (escribir evento a evento bloqueaba el hilo eventlet).
 EVENT_FLUSH_EVERY = 50
 
-METRICS_DIR = os.path.join(config.PROJECT_ROOT, "results", "metrics")
-os.makedirs(METRICS_DIR, exist_ok=True)
-EVENTS_CSV = os.path.join(METRICS_DIR, "defense_events.csv")
+EVENTS_DIR = os.path.join(config.PROJECT_ROOT, "results", "events")
+os.makedirs(EVENTS_DIR, exist_ok=True)
+EVENTS_CSV = os.path.join(EVENTS_DIR, "defense_events.csv")
 
 # Ficheros de coordinación con run_03_defense.py:
 #  - ACTIVE_FLAG: existe solo mientras hay una prueba en marcha. Contiene

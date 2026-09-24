@@ -11,7 +11,7 @@ El proyecto se divide en tres fases:
 |---|---|---|---|
 | 1. Dataset | `run_01_dataset.py` | Genera tráfico normal y de ataque en Mininet y registra las estadísticas de flujo que ve el controlador, etiquetadas por flujo | `data/dataset_sdn.csv` |
 | 2. Machine Learning | `ml/run_02_ml.py` | Preprocesa, entrena Logistic Regression, Decision Tree y Random Forest, y los evalúa con validación cruzada agrupada por fase | `models/`, `results/` |
-| 3. Detección y mitigación | `run_03_defense.py` | El controlador clasifica cada flujo en vivo con el mejor modelo y bloquea las conversaciones de ataque con reglas OpenFlow DROP | `results/metrics/`, `results/figures/defense/`, `results/tables/` |
+| 3. Detección y mitigación | `run_03_defense.py` | El controlador clasifica cada flujo en vivo con el mejor modelo y bloquea las conversaciones de ataque con reglas OpenFlow DROP | `results/events/`, `results/figures/defense/`, `results/tables/` |
 
 - **Instalación**: `./setup.sh` (Ubuntu; instala Mininet, Open vSwitch,
   nmap, hping3, iperf y crea el entorno virtual con Ryu, scapy y
@@ -32,46 +32,24 @@ El proyecto se divide en tres fases:
 
 ## Resultados
 
-### Fase 2: evaluación offline
+Resumen; el detalle está en `results/` (tablas CSV y figuras) y el
+análisis completo, en la memoria del TFG.
 
-Dataset de 300.000 filas (~920 fases de tráfico). Validación cruzada
-`GroupKFold` (5 particiones, sin repartir ninguna fase entre
-entrenamiento y prueba). Mejor modelo: **Random Forest**.
+**Fase 2 (evaluación offline).** Dataset de 293.157 flujos y 920 fases,
+validación cruzada `GroupKFold` de 5 particiones. Gana **Random Forest**,
+con un **F1 macro de 0.797 ± 0.018**, frente a 0.715 del árbol de decisión
+y 0.565 de la regresión logística. Las características más determinantes
+son el número de flujos activos en el switch y las de ventana temporal
+(orígenes y destinos distintos en los últimos 5 s).
 
-| Métrica | Valor |
-|---|---|
-| **F1 macro** | **0.799 ± 0.025** |
-| Recall normal | 87.3 % |
-| Recall scanning | 83.1 % |
-| Recall ddos | 70.0 % |
-| Recall spoofing | 70.2 % |
-
-### Fase 3: detección y mitigación en vivo (batería completa)
-
-Las cuatro pruebas (normal, scanning, ddos, spoofing) se ejecutan una
-tras otra, y la batería se repite `DEFENSE_BATTERY_RUNS` veces (10 por
-defecto), porque cada ejecución elige al azar atacantes, víctimas y
-variantes de cada ataque. Las métricas se calculan con el mismo criterio
-de etiqueta que en la fase 2, sobre todos los flujos clasificados.
-
-| Métrica | Valor |
-|---|---|
-| **F1 macro** | **0.740** |
-| Recall macro | 0.752 |
-| Precisión macro | 0.801 |
-| Tráfico normal clasificado correctamente | 93.4 % |
-| Tiempo hasta la primera mitigación | 1 s en los tres ataques (mínimo posible con 2 confirmaciones y sondeo de 1 s) |
-| Latencia del controlador (estadísticas → regla DROP) | 10–18 ms de media según el tráfico |
-| Tiempo de inferencia | 0.8–2.4 ms por flujo de media |
-
-Valores de una sola batería; se sustituirán por la media ± desviación de
-las repeticiones (`results/tables/defense_battery_runs.csv`).
-
-**Cómo comparar con la fase 2.** La precisión y el F1 dependen de la
-proporción de clases, y en la batería el tráfico normal pesa la mitad
-que en el dataset (~22 % frente a 41 %). El recall no depende de esa
-proporción, así que la comparación más directa es el recall por clase y
-el recall macro (0.777 en la fase 2).
+**Fase 3 (detección y mitigación en vivo).** Diez repeticiones de la
+batería completa, con el mismo criterio de etiqueta que en la fase 2:
+**F1 macro de 0.757 ± 0.039**, con un recall macro de 0.767 frente al
+0.774 offline. Los tres ataques se mitigan **en torno a 1 s** desde el
+primer flujo detectado, con una latencia del controlador de 10-11 ms de
+media y un coste de inferencia de 0.8-2 ms por flujo. El coste de los
+falsos positivos son unas 5 conversaciones legítimas bloqueadas 20 s por
+batería (1.2 % de los flujos normales).
 
 ## Decisiones de diseño principales
 

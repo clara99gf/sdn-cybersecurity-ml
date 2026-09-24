@@ -3,7 +3,7 @@ defense/plots.py
 ----------------
 Genera las gráficas y tablas de la fase de detección y mitigación a
 partir del CSV de eventos que escribe controller/sdn_defense.py
-(results/metrics/defense_events.csv).
+(results/events/defense_events.csv).
 
 Cada gráfica de tráfico usa la columna 'traffic_phase' (qué prueba
 estaba en marcha), NO 'predicted_label' -así la gráfica de "scanning"
@@ -41,7 +41,7 @@ import pandas as pd
 
 import config
 
-METRICS_DIR = os.path.join(config.PROJECT_ROOT, "results", "metrics")
+EVENTS_DIR = os.path.join(config.PROJECT_ROOT, "results", "events")
 FIGURES_DIR = os.path.join(config.PROJECT_ROOT, "results", "figures", "defense")
 TABLES_DIR = os.path.join(config.PROJECT_ROOT, "results", "tables")
 os.makedirs(FIGURES_DIR, exist_ok=True)
@@ -64,19 +64,46 @@ def _arr(series):
     return pd.to_numeric(series, errors="coerce").to_numpy()
 
 
-def _phase(df, phase, last_run=False):
+def representative_run(df):
+    """Ejecución REPRESENTATIVA de la batería: aquella cuyo F1 macro está
+    más cerca de la media de todas. Las gráficas temporales muestran una
+    sola ejecución (promediar curvas de ejecuciones distintas no tiene
+    sentido: cada una tiene su ritmo, sus instantes de DROP y su nº de
+    flujos), y conviene que sea un caso típico y no el mejor ni el peor
+    -que es lo que pasaba antes usando simplemente la última-.
+    Si no se puede calcular (una sola ejecución, o ejecuciones
+    incompletas), devuelve la última."""
+    runs = sorted(df["run"].unique())
+    if len(runs) < 2 or "true_label" not in df.columns:
+        return runs[-1] if runs else None
+    try:
+        from sklearn.metrics import f1_score
+        f1s = {}
+        for run in runs:
+            g = df[df["run"] == run]
+            if set(CLASSES) <= set(g["traffic_phase"]):
+                f1s[run] = f1_score(g["true_label"], g["predicted_label"],
+                                    labels=CLASSES, average="macro", zero_division=0)
+        if not f1s:
+            return runs[-1]
+        media = sum(f1s.values()) / len(f1s)
+        return min(f1s, key=lambda r: abs(f1s[r] - media))
+    except Exception:
+        return runs[-1]
+
+
+def _phase(df, phase, one_run=False):
     """Filas de una prueba concreta (por traffic_phase), con el tiempo
     (t_rel) medido desde el INICIO DE ESA PRUEBA. Así, en la batería,
     cada gráfica empieza en 0 s en vez de en el segundo de la batería en
     que arrancó esa prueba.
 
-    last_run=True: solo la última ejecución de la batería. Lo usan las
-    gráficas temporales (superponer varias ejecuciones en el mismo eje de
-    tiempo no tendría sentido); las tablas y la matriz de confusión usan
-    todas las ejecuciones."""
+    one_run=True: solo la ejecución representativa de la batería (ver
+    representative_run). Lo usan las gráficas temporales; las tablas y la
+    matriz de confusión usan todas las ejecuciones."""
     d = df[df["traffic_phase"] == phase]
-    if last_run and len(d):
-        d = d[d["run"] == d["run"].max()]
+    if one_run and len(d):
+        d = d[d["run"] == representative_run(df)]
     d = d.copy()
     if len(d):
         d["t_rel"] = (d["t"] - d["t"].min()).dt.total_seconds()
@@ -109,11 +136,13 @@ def _break_gaps(x, y, max_gap=2.0):
 def _run_suffix(df):
     """Sufijo para el título si la batería tiene varias ejecuciones."""
     n = df["run"].nunique()
-    return f" (ejecución {df['run'].max()} de {n})" if n > 1 else ""
+    if n < 2:
+        return ""
+    return f" (ejecución representativa: {representative_run(df)} de {n})"
 
 
 def _timeline_plot(df, phase, ycol, ylabel, title, color, out_name, logy=False):
-    d = _phase(df, phase, last_run=True)
+    d = _phase(df, phase, one_run=True)
     title = title + _run_suffix(df)
     fig, ax = plt.subplots(figsize=(10, 5))
     if len(d):
@@ -161,7 +190,7 @@ def plot_scanning(events_csv):
     flujos acumulados refleja mejor la actividad de escaneo (un escaneo
     toca muchos destinos/puertos -> muchos flujos)."""
     df = _load(events_csv)
-    d = _phase(df, "scanning", last_run=True)
+    d = _phase(df, "scanning", one_run=True)
     # Solo los flujos que SON escaneo (etiqueta real), no el tráfico de
     # fondo ni el warmup ARP previo. Las líneas DROP se siguen marcando
     # sobre toda la prueba.
@@ -191,7 +220,7 @@ def plot_scanning(events_csv):
 def plot_spoofing(events_csv):
     """Spoofing: detecciones acumuladas durante la prueba de spoofing."""
     df = _load(events_csv)
-    d = _phase(df, "spoofing", last_run=True)
+    d = _phase(df, "spoofing", one_run=True)
     fig, ax = plt.subplots(figsize=(10, 5))
     if len(d):
         # nº de flujos clasificados como spoofing, acumulado en el tiempo
@@ -232,7 +261,7 @@ def plot_cpu_latency(events_csv):
     phases = ["normal", "scanning", "ddos", "spoofing"]
     fig, axes = plt.subplots(2, 2, figsize=(14, 9))
     for ax1, phase in zip(axes.flat, phases):
-        d = _phase(df, phase, last_run=True)
+        d = _phase(df, phase, one_run=True)
         if not len(d):
             ax1.text(0.5, 0.5, f"(sin datos de '{phase}')", ha="center",
                      va="center", transform=ax1.transAxes, color="gray")
@@ -261,67 +290,13 @@ def plot_cpu_latency(events_csv):
     return out
 
 
-def table_cpu_latency(events_csv):
-    """TABLA (no gráfica) del impacto en infraestructura POR TIPO DE
-    TRÁFICO: CPU media del proceso Ryu y latencia del plano de control
-    (evento OFPFlowStatsReply -> envío de la regla OFPFlowMod). En tabla
-    porque, como pediste, así se leen los valores exactos por clase, que
-    en una gráfica de puntos no se distinguen bien."""
-    df = _load(events_csv)
-    rows = []
-    for phase in ["normal", "scanning", "ddos", "spoofing"]:
-        d = _phase(df, phase)
-        if not len(d):
-            continue
-        cpu = pd.to_numeric(d["ryu_cpu_percent"], errors="coerce")
-        lat = pd.to_numeric(d["control_latency_ms"], errors="coerce").dropna()
-        inf = pd.to_numeric(d["inference_ms"], errors="coerce")
-        rows.append({
-            "traffic_phase": phase,
-            "events": len(d),
-            "ryu_cpu_mean_pct": round(cpu.mean(), 2) if len(cpu) else "",
-            "ryu_cpu_max_pct": round(cpu.max(), 2) if len(cpu) else "",
-            "control_latency_mean_ms": round(lat.mean(), 2) if len(lat) else "",
-            "control_latency_max_ms": round(lat.max(), 2) if len(lat) else "",
-            "mitigations": int((d["mitigated"] == 1).sum()),
-            "inference_mean_ms": round(inf.mean(), 3) if len(inf) else "",
-        })
-    tabla = pd.DataFrame(rows)
-    out = os.path.join(TABLES_DIR, "defense_cpu_latency_by_traffic.csv")
-    tabla.to_csv(out, index=False)
-    return out, tabla
-
-
-def table_inference(events_csv):
-    """TABLA del tiempo de inferencia del modelo por tipo de tráfico."""
-    df = _load(events_csv)
-    rows = []
-    for phase in ["normal", "scanning", "ddos", "spoofing"]:
-        d = _phase(df, phase)
-        if not len(d):
-            continue
-        inf = pd.to_numeric(d["inference_ms"], errors="coerce").dropna()
-        if not len(inf):
-            continue
-        rows.append({
-            "traffic_phase": phase,
-            "inference_mean_ms": round(inf.mean(), 3),
-            "inference_min_ms": round(inf.min(), 3),
-            "inference_max_ms": round(inf.max(), 3),
-            "inference_std_ms": round(inf.std(), 3),
-        })
-    tabla = pd.DataFrame(rows)
-    out = os.path.join(TABLES_DIR, "defense_inference_by_traffic.csv")
-    tabla.to_csv(out, index=False)
-    return out, tabla
-
-
 CLASSES = ["normal", "scanning", "ddos", "spoofing"]
 
 
 def plot_confusion_live(events_csv):
     """Matriz de confusión de la fase EN VIVO (etiqueta real vs
-    predicción), sobre todos los flujos clasificados en la batería."""
+    predicción), sobre todos los flujos clasificados (todas las
+    ejecuciones de la batería)."""
     df = _load(events_csv)
     if "true_label" not in df.columns:
         return None
@@ -339,6 +314,53 @@ def plot_confusion_live(events_csv):
     out = os.path.join(FIGURES_DIR, "confusion_matrix_live.png")
     fig.savefig(out, dpi=150); plt.close(fig)
     return out
+
+
+def table_infrastructure(events_csv):
+    """TABLA del impacto en infraestructura POR TIPO DE TRÁFICO, en tabla
+    y no en gráfica porque así se leen los valores exactos por clase, que
+    en una nube de puntos no se distinguen:
+
+      - CPU media y máxima del proceso Ryu.
+      - Latencia del plano de control: del evento OFPFlowStatsReply al
+        envío de la regla OFPFlowMod (solo se mide cuando hay mitigación).
+      - Tiempo de inferencia del modelo por flujo (media, máximo y
+        desviación). Es el coste amortizado: el controlador clasifica de
+        una vez todos los flujos de un sondeo, así que el coste fijo de
+        cada llamada al modelo se reparte entre los flujos del lote.
+      - Nº de mitigaciones aplicadas.
+
+    Antes esto estaba repartido en dos tablas (CPU/latencia e inferencia)
+    que repetían la columna de inferencia media; es la misma medida sobre
+    los mismos eventos, así que va en una sola."""
+    df = _load(events_csv)
+    rows = []
+    for phase in CLASSES:
+        d = _phase(df, phase)
+        if not len(d):
+            continue
+        cpu = pd.to_numeric(d["ryu_cpu_percent"], errors="coerce").dropna()
+        lat = pd.to_numeric(d["control_latency_ms"], errors="coerce").dropna()
+        inf = pd.to_numeric(d["inference_ms"], errors="coerce").dropna()
+
+        def r(serie, fn, n=2):
+            return round(fn(serie), n) if len(serie) else ""
+        rows.append({
+            "traffic_phase": phase,
+            "events": len(d),
+            "ryu_cpu_mean_pct": r(cpu, lambda x: x.mean()),
+            "ryu_cpu_max_pct": r(cpu, lambda x: x.max()),
+            "control_latency_mean_ms": r(lat, lambda x: x.mean()),
+            "control_latency_max_ms": r(lat, lambda x: x.max()),
+            "inference_mean_ms": r(inf, lambda x: x.mean(), 3),
+            "inference_max_ms": r(inf, lambda x: x.max(), 3),
+            "inference_std_ms": r(inf, lambda x: x.std(), 3),
+            "mitigations": int((d["mitigated"] == 1).sum()),
+        })
+    tabla = pd.DataFrame(rows)
+    out = os.path.join(TABLES_DIR, "defense_infrastructure_by_traffic.csv")
+    tabla.to_csv(out, index=False)
+    return out, tabla
 
 
 def _prf(df, labels):
@@ -441,7 +463,7 @@ def table_battery_runs(events_csv):
 def generate_one(kind, events_csv=None):
     """Genera SOLO la gráfica del tipo de tráfico indicado (para las
     pruebas individuales). No genera las de otros tipos ni las tablas."""
-    events_csv = events_csv or os.path.join(METRICS_DIR, "defense_events.csv")
+    events_csv = events_csv or os.path.join(EVENTS_DIR, "defense_events.csv")
     if not os.path.exists(events_csv):
         print(f"[plots] No existe {events_csv}; ejecuta antes una prueba.")
         return None
@@ -460,7 +482,7 @@ def generate_one(kind, events_csv=None):
 
 def generate_all(events_csv=None):
     """Genera todas las gráficas y tablas. Devuelve la lista de rutas."""
-    events_csv = events_csv or os.path.join(METRICS_DIR, "defense_events.csv")
+    events_csv = events_csv or os.path.join(EVENTS_DIR, "defense_events.csv")
     if not os.path.exists(events_csv):
         print(f"[plots] No existe {events_csv}; ejecuta antes una prueba de tráfico.")
         return []
@@ -473,20 +495,17 @@ def generate_all(events_csv=None):
     if cm_out:
         outs.append(cm_out)
     n_figs = len(outs)
-    cpu_out, cpu_tab = table_cpu_latency(events_csv)
-    inf_out, inf_tab = table_inference(events_csv)
+    infra_out, infra_tab = table_infrastructure(events_csv)
     det_out, det_tab = table_detection(events_csv)
     runs_out, runs_tab = table_battery_runs(events_csv)
-    outs += [cpu_out, inf_out]
+    outs.append(infra_out)
 
     print("[plots] Gráficas generadas:")
     for o in outs[:n_figs]:
         print("   ", o)
     print("[plots] Tablas generadas:")
-    print("   ", cpu_out)
-    print(cpu_tab.to_string(index=False))
-    print("   ", inf_out)
-    print(inf_tab.to_string(index=False))
+    print("   ", infra_out)
+    print(infra_tab.to_string(index=False))
     if det_out:
         outs.append(det_out)
         print("   ", det_out)
@@ -500,7 +519,7 @@ def generate_all(events_csv=None):
 
 if __name__ == "__main__":
     # Regenera gráficas y tablas a partir de un CSV ya recogido, sin volver
-    # a lanzar la red. Por defecto, el último (results/metrics/defense_events.csv):
+    # a lanzar la red. Por defecto, el último (results/events/defense_events.csv):
     #     venv/bin/python3 defense/plots.py
-    #     venv/bin/python3 defense/plots.py results/metrics/defense_events_battery.csv
+    #     venv/bin/python3 defense/plots.py results/events/defense_events_battery.csv
     generate_all(sys.argv[1] if len(sys.argv) > 1 else None)

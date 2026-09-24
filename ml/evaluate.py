@@ -63,7 +63,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score,
-    confusion_matrix, ConfusionMatrixDisplay,
+    precision_recall_fscore_support, confusion_matrix, ConfusionMatrixDisplay,
 )
 from sklearn.model_selection import GroupKFold
 from sklearn.preprocessing import StandardScaler
@@ -140,6 +140,27 @@ def cross_validate_model(model_ctor, X, y, groups, n_splits=N_CV_FOLDS):
     return oof_pred, per_fold_metrics, per_flow_inference_times
 
 
+def per_class_metrics(y_true, y_pred, class_names, model_display_name):
+    """Precision / recall / F1 y nº de muestras POR CLASE, a partir de las
+    predicciones out-of-fold.
+
+    Las métricas macro dicen cómo va el modelo en conjunto, pero no qué
+    ataque detecta mejor o peor, que es lo que interesa discutir en la
+    memoria -y lo que permite comparar directamente con la tabla por clase
+    de la detección en vivo (fase 3)-. Antes había que sacarlo a mano de
+    la matriz de confusión."""
+    p, r, f, n = precision_recall_fscore_support(
+        y_true, y_pred, labels=range(len(class_names)), zero_division=0)
+    return pd.DataFrame({
+        "model": model_display_name,
+        "class": class_names,
+        "precision": p.round(4),
+        "recall": r.round(4),
+        "f1": f.round(4),
+        "support": n,
+    })
+
+
 def plot_metrics_bar(metrics_df, out_path):
     ax = metrics_df.set_index("model")[["accuracy", "precision", "recall", "f1"]].plot(
         kind="bar", figsize=(9, 5), rot=0,
@@ -189,7 +210,7 @@ def main():
               "entrenamiento quedará vacía.")
         training_times = {}
 
-    rows, cost_rows = [], []
+    rows, cost_rows, per_class_rows = [], [], []
     for key, display_name in MODEL_NAMES.items():
         print(f"[evaluate] {display_name}: validación cruzada agrupada por fase...")
         oof_pred, fold_f1s, per_flow_times = cross_validate_model(
@@ -210,6 +231,8 @@ def main():
             "inference_time_ms_per_flow": float(np.mean(per_flow_times)) * 1000,
         })
 
+        per_class_rows.append(per_class_metrics(y, oof_pred, class_names, display_name))
+
         cm = confusion_matrix(y, oof_pred)
         plot_confusion_matrix(
             cm, class_names, display_name,
@@ -220,6 +243,9 @@ def main():
 
     metrics_df = pd.DataFrame(rows)
     cost_df = pd.DataFrame(cost_rows)
+
+    per_class_df = pd.concat(per_class_rows, ignore_index=True)
+    per_class_df.to_csv(os.path.join(config.TABLES_DIR, "metrics_by_class.csv"), index=False)
 
     metrics_df.to_csv(os.path.join(config.TABLES_DIR, "metrics_comparison.csv"), index=False)
     cost_df.to_csv(os.path.join(config.TABLES_DIR, "computational_cost.csv"), index=False)
@@ -240,6 +266,11 @@ def main():
     print(metrics_df.to_string(index=False))
     print("\n=== Tabla de coste computacional ===")
     print(cost_df.to_string(index=False))
+    print(f"\n=== Métricas por clase del mejor modelo ({best_row['model']}) ===")
+    print(per_class_df[per_class_df["model"] == best_row["model"]]
+          .drop(columns="model").to_string(index=False))
+    print("    (las de los tres modelos, en "
+          f"{os.path.join(config.TABLES_DIR, 'metrics_by_class.csv')})")
 
 
 if __name__ == "__main__":

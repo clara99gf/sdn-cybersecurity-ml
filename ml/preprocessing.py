@@ -326,6 +326,51 @@ def encode_categoricals(df: pd.DataFrame) -> tuple:
     return df, encoders
 
 
+def summarize_dataset(df: pd.DataFrame, groups) -> pd.DataFrame:
+    """Tabla descriptiva del dataset que se va a entrenar: por clase, nº de
+    flujos, porcentaje, nº de fases de tráfico distintas (los grupos de la
+    validación cruzada) y reparto por protocolo.
+
+    Se calcula aquí, justo después de descartar el warmup y los duplicados
+    y antes de codificar, que es cuando el dataset ya es el definitivo
+    pero las columnas siguen siendo legibles (ip_proto/eth_type sin
+    codificar). Se guarda en results/tables/dataset_summary.csv: es la
+    tabla que describe el dataset en la memoria."""
+    proto = pd.Series("otro", index=df.index)
+    proto[df["eth_type"] == 2054] = "arp"
+    proto[df["ip_proto"] == 1] = "icmp"
+    proto[df["ip_proto"] == 6] = "tcp"
+    proto[df["ip_proto"] == 17] = "udp"
+    g = pd.Series(groups, index=df.index)
+    filas = []
+    for clase in sorted(df[config.TARGET_COLUMN].unique()):
+        m = df[config.TARGET_COLUMN] == clase
+        fila = {
+            "class": clase,
+            "flows": int(m.sum()),
+            "share_pct": round(m.mean() * 100, 2),
+            # OJO: una misma fase puede aportar flujos de más de una clase
+            # (en una fase de ataque también hay ARP/ICMP entre hosts no
+            # implicados, que se etiqueta como normal). Por eso la suma de
+            # esta columna es mayor que el total de fases.
+            "phases_with_class": int(g[m].nunique()),
+        }
+        for pr in ["arp", "icmp", "tcp", "udp"]:
+            fila[f"{pr}_pct"] = round((proto[m] == pr).mean() * 100, 1)
+        filas.append(fila)
+    tabla = pd.DataFrame(filas)
+    total = {"class": "total", "flows": int(len(df)), "share_pct": 100.0,
+             "phases_with_class": int(pd.Series(groups).nunique())}
+    for pr in ["arp", "icmp", "tcp", "udp"]:
+        total[f"{pr}_pct"] = round((proto == pr).mean() * 100, 1)
+    tabla = pd.concat([tabla, pd.DataFrame([total])], ignore_index=True)
+    out = os.path.join(config.TABLES_DIR, "dataset_summary.csv")
+    tabla.to_csv(out, index=False)
+    print(f"\n[preprocessing] Tabla descriptiva del dataset -> {out}")
+    print(tabla.to_string(index=False))
+    return tabla
+
+
 def main(include_window_features: bool = INCLUDE_TEMPORAL_WINDOW_FEATURES):
     df = load_raw_data()
 
@@ -350,6 +395,7 @@ def main(include_window_features: bool = INCLUDE_TEMPORAL_WINDOW_FEATURES):
 
     df, groups = drop_warmup_rows(df, groups)
     df, groups = drop_duplicates(df, groups)
+    summarize_dataset(df, groups)
     df = drop_identifier_columns(df)
     df = drop_constant_columns(df)
     df = clean_nulls_and_infinites(df)

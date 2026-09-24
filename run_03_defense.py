@@ -32,7 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config
 
 CONTROLLER = os.path.join("controller", "sdn_defense.py")
-EVENTS_CSV = os.path.join(config.PROJECT_ROOT, "results", "metrics", "defense_events.csv")
+EVENTS_CSV = os.path.join(config.PROJECT_ROOT, "results", "events", "defense_events.csv")
 # Archivo-interruptor que activa la detección/mitigación en el controlador
 # (ver ACTIVE_FLAG en sdn_defense.py). Solo existe mientras corre una prueba.
 ACTIVE_FLAG = os.path.join(config.RUNTIME_DIR, "defense_active.flag")
@@ -271,6 +271,8 @@ def _cleanup(controller_proc=None, net=None):
 # Pruebas de tráfico
 # --------------------------------------------------------------------- #
 def _run_single(net, kind, duration=None, reset=True, plot=True, summary=True, run=1):
+    global _pruebas_lanzadas
+    _pruebas_lanzadas += 1
     from defense import traffic, plots
     if reset:
         _reset_all(silent=True)   # borra métricas Y gráficas/tablas anteriores
@@ -281,7 +283,7 @@ def _run_single(net, kind, duration=None, reset=True, plot=True, summary=True, r
         duration = PHASE_DURATION_BY_KIND.get(kind, PHASE_DURATION)
     print(f"\n*** Generando tráfico '{kind}' durante {duration}s...", flush=True)
     print("    (el controlador clasifica y mitiga en vivo; métricas -> "
-          "results/metrics/defense_events.csv)", flush=True)
+          "results/events/defense_events.csv)", flush=True)
     _reset_label_file()
     _remove(READY_FLAG)
     _set_active(True, kind, run)   # activar detección+mitigación SOLO durante la prueba
@@ -321,6 +323,22 @@ def _run_single(net, kind, duration=None, reset=True, plot=True, summary=True, r
             print(f"*** Aviso: no se pudo generar la gráfica ({e}). "
                   f"Las métricas están en {EVENTS_CSV}.")
     return attackers
+
+
+# Nº de pruebas lanzadas EN ESTA SESIÓN (opciones 1-5 del menú). Sirve
+# para no anunciar al salir unas métricas y gráficas que, o no existen, o
+# son de una sesión anterior -si se sale sin lanzar nada, p.ej. con
+# Ctrl+C en el menú, no hay resultados nuevos que mirar-.
+_pruebas_lanzadas = 0
+# True si la última prueba lanzada se cortó a medias (Ctrl+C): lo que haya
+# en el CSV es un trozo de prueba, no un experimento completo, y hay que
+# avisarlo para no usarlo por error en la memoria.
+_prueba_interrumpida = False
+# Ejecución de la batería en curso (nº actual, total) o None si lo que se
+# está ejecutando es una prueba suelta. Sirve para avisar con precisión si
+# se interrumpe: no es lo mismo cortar una prueba individual que cortar la
+# batería en su 7ª repetición.
+_bateria_en_curso = None
 
 
 def _count_events():
@@ -436,7 +454,9 @@ def _run_battery(net):
     # try/except para que un fallo en una no impida las siguientes.
     _reset_all(silent=True)
     n_runs = max(1, int(getattr(config, "DEFENSE_BATTERY_RUNS", 1)))
+    global _bateria_en_curso
     for run in range(1, n_runs + 1):
+        _bateria_en_curso = (run, n_runs)
         print(f"\n=== BATERÍA {run}/{n_runs}: normal -> scanning -> ddos -> spoofing ===")
         for kind in ["normal", "scanning", "ddos", "spoofing"]:
             try:
@@ -445,6 +465,7 @@ def _run_battery(net):
                 print(f"*** Aviso: la prueba '{kind}' falló ({e}), continúo con la siguiente.")
                 _set_active(False)
             _drain(3)  # dejar que las últimas estadísticas se procesen
+    _bateria_en_curso = None
     print("\n=== Batería terminada. Generando gráficas y tablas... ===")
     _print_summary()
     # Guardar una copia del CSV completo de la batería (con las 4 clases),
@@ -452,7 +473,7 @@ def _run_battery(net):
     # CSV que interesa conservar para la memoria.
     try:
         import shutil
-        copia = os.path.join(config.PROJECT_ROOT, "results", "metrics",
+        copia = os.path.join(config.PROJECT_ROOT, "results", "events",
                              "defense_events_battery.csv")
         if os.path.exists(EVENTS_CSV):
             shutil.copy(EVENTS_CSV, copia)
@@ -522,6 +543,7 @@ MENU = f"""
 
 
 def main():
+    global _prueba_interrumpida, _bateria_en_curso
     if os.geteuid() != 0:
         print("Este script necesita sudo (Mininet).")
         sys.exit(1)
@@ -538,30 +560,91 @@ def main():
     try:
         net = _build_net()
         print("*** Red lista. El controlador de defensa está clasificando en vivo.")
+        acciones = {
+            "1": lambda: _run_single(net, "normal"),
+            "2": lambda: _run_single(net, "scanning"),
+            "3": lambda: _run_single(net, "ddos"),
+            "4": lambda: _run_single(net, "spoofing"),
+            "5": lambda: _run_battery(net),
+        }
         while True:
             print(MENU)
-            choice = input("Elige una opción [1-6]: ").strip()
-            if choice == "1":
-                _run_single(net, "normal")
-            elif choice == "2":
-                _run_single(net, "scanning")
-            elif choice == "3":
-                _run_single(net, "ddos")
-            elif choice == "4":
-                _run_single(net, "spoofing")
-            elif choice == "5":
-                _run_battery(net)
-            elif choice == "6":
+            try:
+                choice = input("Elige una opción [1-6]: ").strip()
+            except EOFError:
                 break
-            else:
+            if choice == "6":
+                break
+            accion = acciones.get(choice)
+            if accion is None:
                 print("Opción no válida.")
+                continue
+            try:
+                accion()
+            except KeyboardInterrupt:
+                # Ctrl+C DURANTE una prueba: se corta esa prueba (su propio
+                # bloque finally ya ha desactivado la detección y matado las
+                # herramientas de tráfico) y se vuelve al menú, en vez de
+                # terminar toda la sesión -la red y el controlador siguen
+                # levantados, así que se puede lanzar otra prueba-. Para
+                # salir, opción 6 o Ctrl+C en el propio menú.
+                _prueba_interrumpida = True
+                _set_active(False)
+                traffic.kill_all_attack_procs(net)
+                _reset_label_file()
+                if _bateria_en_curso:
+                    run, total = _bateria_en_curso
+                    print(f"\n*** BATERÍA interrumpida en la ejecución {run} de "
+                          f"{total}. Lo registrado queda en el CSV, pero la batería "
+                          f"está A MEDIAS:")
+                    print("    no se han generado resumen, gráficas ni tablas, y las "
+                          "métricas por ejecución")
+                    print("    (media y desviación) necesitan las ejecuciones "
+                          "completas.")
+                    print("    Vuelve a lanzar la batería (empieza borrando lo "
+                          "anterior) o sal con la opción 6.")
+                else:
+                    print("\n*** Prueba interrumpida. Lo registrado hasta ahora queda "
+                          "en el CSV, pero es una prueba A MEDIAS:")
+                    print("    no se han generado ni resumen ni gráficas, y esos datos "
+                          "no sirven como resultado.")
+                    print("    Vuelve a lanzarla (cada prueba empieza borrando lo "
+                          "anterior) o sal con la opción 6.")
+                _bateria_en_curso = None
     except KeyboardInterrupt:
         print("\n*** Interrumpido por el usuario.")
     finally:
         _cleanup(controller_proc, net)
         print("\n*** Fin de la fase de detección y mitigación.")
-        print(f"    Métricas: {EVENTS_CSV}")
-        print(f"    Gráficas: {os.path.join('results', 'figures', 'defense')}")
+        # Se anuncian las salidas solo si REALMENTE hay algo que mirar:
+        # eventos registrados, gráficas o tablas. Si no, se dice y ya -no
+        # tiene sentido dar la ruta de un CSV vacío, ni repetir el aviso
+        # de la prueba interrumpida cuando no llegó a registrar nada-.
+        figuras = os.path.join(config.PROJECT_ROOT, "results", "figures", "defense")
+        tablas = os.path.join(config.PROJECT_ROOT, "results", "tables")
+        eventos = _count_events()
+        hay_png = os.path.isdir(figuras) and any(
+            f.endswith(".png") for f in os.listdir(figuras))
+        hay_tablas = os.path.isdir(tablas) and any(
+            f.startswith("defense_") for f in os.listdir(tablas))
+        if _pruebas_lanzadas == 0:
+            # Nada lanzado en ESTA sesión: lo que haya en results/ es de una
+            # sesión anterior, así que no se anuncia como si fuera nuevo.
+            print("    (no se lanzó ninguna prueba en esta sesión: no hay "
+                  "resultados nuevos)")
+        elif not (eventos or hay_png or hay_tablas):
+            print("    (la prueba se interrumpió antes de registrar nada: "
+                  "no hay resultados)")
+        else:
+            if _prueba_interrumpida:
+                print("    AVISO: la última prueba se interrumpió; estos datos "
+                      "están incompletos.")
+            if eventos:
+                print(f"    Métricas: {EVENTS_CSV} ({eventos} eventos)")
+            if hay_png:
+                print(f"    Gráficas: {figuras}")
+            if hay_tablas:
+                print(f"    Tablas:   {tablas}")
 
 
 if __name__ == "__main__":

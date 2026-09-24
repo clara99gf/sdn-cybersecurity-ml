@@ -185,13 +185,16 @@ TEST_SIZE = 0.2
 # Nº de características a conservar tras la selección por importancia
 # (Random Forest), dentro de cada fold.
 #
-# PENDIENTE DE REVALIDAR: el valor 15 se fijó hace tiempo, cuando el
-# dataset tenía más columnas y la evaluación aún usaba split aleatorio
-# (con fuga de información). Ahora solo hay 21 características, así que
-# el recorte descarta 6 -y una medición sin recorte dio un F1 algo más
-# alto-. Merece la pena comparar 15 frente a 21 ejecutando
-# `ml/evaluate.py` con cada valor (~2,5 min cada uno) y quedarse con el
-# mejor, en vez de arrastrar un número heredado.
+# COMPROBADO (no es un número heredado): se midió con `ml/evaluate.py`
+# usando los dos valores sobre el dataset completo (293.157 filas,
+# GroupKFold de 5 particiones). Random Forest da F1 = 0.7972 con 15 y
+# 0.7975 con las 22, una diferencia de 0.0003 frente a una desviación
+# entre particiones de 0.018: el mismo resultado. Se mantiene 15 porque
+# usa un 32% menos de características por el mismo rendimiento, y con
+# una inferencia algo más barata (0.0031 vs 0.0034 ms/flujo).
+# (La regresión logística sí mejora con las 22 -0.565 a 0.592-, al ser
+# lineal aprovecha cualquier señal extra; Random Forest ya descarta por
+# su cuenta lo irrelevante. No cambia qué modelo gana.)
 N_FEATURES = 15
 
 TARGET_COLUMN = "label"

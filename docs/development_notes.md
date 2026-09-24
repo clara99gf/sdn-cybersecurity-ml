@@ -1,119 +1,146 @@
-# Ejecución
+# Detección y mitigación de amenazas en SDN con Machine Learning (TFG)
 
-Requisito previo (una sola vez): `./setup.sh`, que instala las
-dependencias y crea el entorno virtual `venv/`.
+Sistema que combina Redes Definidas por Software (SDN) e Inteligencia
+Artificial para detectar y mitigar en tiempo real ataques de **scanning**,
+**spoofing** (ARP e IP) y **DDoS** en una red emulada con Mininet y
+controlada por Ryu (OpenFlow 1.3).
 
-Las fases 1 y 3 usan Mininet y necesitan `sudo`. Se lanzan siempre con
-`sudo venv/bin/python3 ...` (y no con `sudo python3`), porque `sudo`
-ignora el venv activado; con la ruta explícita se usa el Python del venv
-con permisos de root.
+El proyecto se divide en tres fases:
 
-## Fase 1: generación del dataset
+| Fase | Script | Qué hace | Resultado |
+|---|---|---|---|
+| 1. Dataset | `run_01_dataset.py` | Genera tráfico normal y de ataque en Mininet y registra las estadísticas de flujo que ve el controlador, etiquetadas por flujo | `data/dataset_sdn.csv` |
+| 2. Machine Learning | `ml/run_02_ml.py` | Preprocesa, entrena Logistic Regression, Decision Tree y Random Forest, y los evalúa con validación cruzada agrupada por fase | `models/`, `results/` |
+| 3. Detección y mitigación | `run_03_defense.py` | El controlador clasifica cada flujo en vivo con el mejor modelo y bloquea las conversaciones de ataque con reglas OpenFlow DROP | `results/metrics/`, `results/figures/defense/`, `results/tables/` |
 
-```bash
-sudo venv/bin/python3 run_01_dataset.py
-```
+- **Instalación**: `./setup.sh` (Ubuntu; instala Mininet, Open vSwitch,
+  nmap, hping3, iperf y crea el entorno virtual con Ryu, scapy y
+  scikit-learn).
+- **Ejecución paso a paso**: [`EJECUCION.md`](EJECUCION.md).
+- **Parámetros**: todos centralizados en `config.py`, con una sección por fase.
 
-Arranca el controlador Ryu (`controller/sdn_monitor.py`), levanta la
-topología, genera fases de tráfico aleatorias hasta alcanzar
-`TARGET_ROWS` (300.000 filas, unas 5 horas) y al terminar, o con
-`Ctrl+C`, detiene el controlador y limpia Mininet. Si el controlador no
-arranca, muestra en la terminal las últimas líneas de su log.
+## Entorno
 
-Genera `data/dataset_sdn.csv`. El tamaño y la duración se ajustan en
-`config.py` (`TARGET_ROWS`, `TOTAL_DURATION`); hay valores comentados
-para tiradas de prueba cortas.
+- Topología en árbol (profundidad 2, fanout 4): 5 switches y 16 hosts,
+  enlaces de 10 Mbps.
+- Controlador Ryu con reglas reactivas granulares (una regla por flujo)
+  y sondeo de estadísticas cada segundo.
+- Tráfico normal: `ping` e `iperf` TCP/UDP. Ataques: `nmap` y sondas ACK
+  con `hping3` (scanning), `hping3` SYN/UDP/ICMP con varios atacantes
+  (DDoS), envenenamiento ARP con scapy e IP spoofing con `hping3 -a`
+  (spoofing).
 
-**Prueba manual** (red y controlador reales, sin generar el dataset),
-útil para lanzar comandos a mano desde la CLI de Mininet:
+## Resultados
 
-```bash
-# Terminal 1
-sudo venv/bin/ryu-manager controller/sdn_monitor.py
-# Terminal 2 (la variable va DESPUÉS de sudo)
-sudo SDN_MANUAL_TEST=1 venv/bin/python3 mininet_lab/topology.py
-```
+### Fase 2: evaluación offline
 
-Si no existe `venv/bin/ryu-manager` (depende de cómo se instalara Ryu),
-usa `sudo ryu-manager ...`.
+Dataset de 300.000 filas (~920 fases de tráfico). Validación cruzada
+`GroupKFold` (5 particiones, sin repartir ninguna fase entre
+entrenamiento y prueba). Mejor modelo: **Random Forest**.
 
-## Fase 2: preprocesado, entrenamiento y evaluación
-
-Sin `sudo` (trabaja sobre el CSV, no usa Mininet):
-
-```bash
-venv/bin/python3 ml/run_02_ml.py
-```
-
-Equivale a ejecutar en orden `ml/preprocessing.py`, `ml/train.py` y
-`ml/evaluate.py` (se pueden lanzar por separado para depurar).
-
-Genera `data/processed/`, los modelos en `models/` (incluido
-`best_model.pkl`, el que usa la fase 3) y las tablas y figuras en
-`results/tables/` y `results/figures/`.
-
-## Fase 3: detección y mitigación en vivo
-
-Requiere haber ejecutado antes la fase 2 (artefactos en `models/`).
-
-```bash
-sudo venv/bin/python3 run_03_defense.py
-```
-
-Arranca el controlador de defensa (`controller/sdn_defense.py`) y la red,
-y abre un menú:
-
-| Opción | Qué hace |
+| Métrica | Valor |
 |---|---|
-| 1-4 | Prueba individual de 30 s con un solo tipo de tráfico (normal, scanning, ddos o spoofing): resumen en terminal y su gráfica |
-| 5 | Batería completa: los cuatro tipos seguidos, con resumen global (F1 macro), todas las gráficas y las tablas |
-| 6 | Salir limpiando el entorno |
+| **F1 macro** | **0.799 ± 0.025** |
+| Recall normal | 87.3 % |
+| Recall scanning | 83.1 % |
+| Recall ddos | 70.0 % |
+| Recall spoofing | 70.2 % |
 
-Cada opción borra los resultados anteriores de la fase 3. La duración de
-las pruebas y los parámetros de la mitigación están en la sección
-"Fase 3" de `config.py`.
+### Fase 3: detección y mitigación en vivo (batería completa)
 
-Resultados:
+Las cuatro pruebas (normal, scanning, ddos, spoofing) se ejecutan una
+tras otra, y la batería se repite `DEFENSE_BATTERY_RUNS` veces (10 por
+defecto), porque cada ejecución elige al azar atacantes, víctimas y
+variantes de cada ataque. Las métricas se calculan con el mismo criterio
+de etiqueta que en la fase 2, sobre todos los flujos clasificados.
 
-- `results/metrics/defense_events.csv`: un evento por flujo clasificado
-  (predicción, etiqueta real, inferencia, latencia, CPU, DROP).
-- `results/metrics/defense_events_battery.csv`: copia de la última
-  batería, que no se sobrescribe con las pruebas individuales.
-- `results/figures/defense/`: gráficas por tipo de tráfico, CPU frente a
-  latencia y matriz de confusión en vivo.
-- `results/tables/defense_*.csv`: detección por clase, CPU y latencia,
-  tiempos de inferencia.
-
-Para regenerar gráficas y tablas desde un CSV ya recogido, sin volver a
-lanzar la red:
-
-```bash
-venv/bin/python3 defense/plots.py results/metrics/defense_events_battery.csv
-```
-
-## Dónde queda cada cosa
-
-| Qué | Dónde |
+| Métrica | Valor |
 |---|---|
-| Dataset | `data/dataset_sdn.csv` |
-| Datos procesados | `data/processed/` |
-| Modelos | `models/` |
-| Tablas y figuras | `results/tables/`, `results/figures/` |
-| Métricas de la fase 3 | `results/metrics/` |
-| Logs del controlador | `logs/ryu_controller.log` (fase 1), `logs/ryu_defense.log` (fase 3) |
-| Logs del tráfico | `logs/traffic_generator.log` (fase 1), `logs/defense_traffic.log` (fase 3) |
-| Ficheros de coordinación | `runtime/` |
+| **F1 macro** | **0.740** |
+| Recall macro | 0.752 |
+| Precisión macro | 0.801 |
+| Tráfico normal clasificado correctamente | 93.4 % |
+| Tiempo hasta la primera mitigación | 1 s en los tres ataques (mínimo posible con 2 confirmaciones y sondeo de 1 s) |
+| Latencia del controlador (estadísticas → regla DROP) | 10–18 ms de media según el tráfico |
+| Tiempo de inferencia | 0.8–2.4 ms por flujo de media |
 
-Todo se guarda dentro del proyecto (no en `/tmp`) para que sea visible
-con el usuario normal aunque se ejecute con `sudo`. Las rutas se
-configuran en `config.py`.
+Valores de una sola batería; se sustituirán por la media ± desviación de
+las repeticiones (`results/tables/defense_battery_runs.csv`). Las tablas
+y la matriz de confusión agregan todas las ejecuciones; las gráficas
+temporales muestran la ejecución representativa (la de F1 macro más
+cercano a la media).
 
-## Si algo se queda colgado
+**Cómo comparar con la fase 2.** La precisión y el F1 dependen de la
+proporción de clases, y en la batería el tráfico normal pesa la mitad
+que en el dataset (~22 % frente a 41 %). El recall no depende de esa
+proporción, así que la comparación más directa es el recall por clase y
+el recall macro (0.777 en la fase 2).
 
-```bash
-sudo mn -c
-sudo pkill -f ryu-manager
+## Decisiones de diseño principales
+
+- **Etiquetado por flujo**: cada ataque declara sus actores (atacante,
+  víctimas, identidad suplantada) y solo los flujos que los involucran,
+  en ambos sentidos, se etiquetan como ataque.
+- **Evaluación sin fuga de información**: `GroupKFold` agrupado por fase,
+  con escalado y selección de características dentro de cada partición.
+- **Mismo cálculo en entrenamiento y en vivo**: la fase 3 reutiliza el
+  generador de tráfico de la fase 1, el mismo cálculo de contadores y
+  tasas del monitor, el mismo módulo de ventanas temporales
+  (`feature_windows.py`) y el mismo criterio de etiquetado, para evitar
+  diferencias entre lo que el modelo vio al entrenar y lo que ve en vivo.
+- **Mitigación por conversación**: se bloquea el par MAC origen → MAC
+  destino, en todos los switches, tras confirmarlo en dos sondeos, y
+  con una regla temporal (20 s). Así un falso positivo corta una
+  conversación durante un tiempo acotado, no un host entero.
+
+## Limitaciones conocidas
+
+- Las fases de ataque se generan sin tráfico legítimo concurrente.
+- El criterio de actores incluye a la víctima: en DDoS y spoofing, un
+  flujo entre la víctima y un host ajeno también contaría como ataque.
+- La tasa de un flujo recién instalado se estima como paquetes/edad, lo
+  que da picos irreales cuando el flujo tiene milisegundos (igual en el
+  dataset y en vivo, así que es coherente con el entrenamiento).
+- La vinculación IP↔MAC de referencia (`ip_mac_consistent`) se toma de
+  Mininet; en una red real vendría de DHCP o de un inventario.
+- En IP spoofing, la mitigación puede cortar temporalmente alguna
+  conversación del host cuya IP se falsifica.
+
+## Estructura
+
+```
+config.py               Parámetros y rutas de todo el proyecto
+feature_windows.py      Ventana temporal deslizante (compartida por fases 2 y 3)
+run_01_dataset.py       Fase 1: controlador + red + generación del dataset
+run_03_defense.py       Fase 3: menú de detección y mitigación en vivo
+setup.sh / setup.py     Instalación (dependencias de sistema, venv, pip install -e .)
+controller/
+  sdn_monitor.py        Fase 1: app Ryu que registra y etiqueta los flujos
+  sdn_defense.py        Fase 3: app Ryu que clasifica en vivo y mitiga
+  live_classifier.py    Fase 3: preprocesado idéntico al del entrenamiento, flujo a flujo
+mininet_lab/
+  topology.py           Fase 1: topología Mininet
+  traffic_generator.py  Tráfico normal y de ataque (fases 1 y 3)
+  arp_spoof.py          ARP spoofing multi-víctima (scapy)
+ml/
+  preprocessing.py      Limpieza, ventanas temporales, codificación
+  train.py              Entrenamiento de los tres modelos
+  evaluate.py           GroupKFold, métricas, matrices de confusión, coste
+  run_02_ml.py          Fase 2 completa en un comando
+  utils.py              Guardado y carga de datos y modelos
+defense/
+  traffic.py            Fase 3: lanza el tráfico de cada prueba
+  plots.py              Fase 3: gráficas y tablas de resultados
+data/                   Dataset (dataset_sdn.csv) y datos procesados
+models/                 Modelos entrenados (se generan, no se versionan)
+results/                Métricas, tablas y figuras de las fases 2 y 3
+logs/, runtime/         Logs y ficheros de coordinación entre procesos
 ```
 
-Si una clase de tráfico no aparece, revisa primero el log de tráfico de
-la fase correspondiente: ahí quedan los comandos lanzados y sus errores.
+## Ficheros versionados
+
+`data/dataset_sdn.csv` se incluye en el repositorio porque generarlo
+lleva varias horas. Los modelos (`models/*.pkl`) y los datos procesados
+no se incluyen: se regeneran en unos minutos con `ml/run_02_ml.py`
+(además, `random_forest.pkl` supera el límite de tamaño de GitHub).
+`results/` sí se incluye, como evidencia directa de los resultados.

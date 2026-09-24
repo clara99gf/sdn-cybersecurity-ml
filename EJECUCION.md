@@ -49,8 +49,16 @@ Equivale a ejecutar en orden `ml/preprocessing.py`, `ml/train.py` y
 `ml/evaluate.py` (se pueden lanzar por separado para depurar).
 
 Genera `data/processed/`, los modelos en `models/` (incluido
-`best_model.pkl`, el que usa la fase 3) y las tablas y figuras en
-`results/tables/` y `results/figures/`.
+`best_model.pkl`, el que usa la fase 3) y, en `results/tables/` y
+`results/figures/`:
+
+- `dataset_summary.csv`: descripción del dataset (flujos, fases y
+  protocolos por clase).
+- `feature_importances.csv` y `.png`: en qué se fija el modelo.
+- `metrics_comparison.csv` y `.png`: comparativa de los tres modelos.
+- `metrics_by_class.csv`: precision, recall y F1 por clase de cada modelo.
+- `confusion_matrix_*.png`: una matriz por modelo.
+- `computational_cost.csv` y `.png`: entrenamiento e inferencia.
 
 ## Fase 3: detección y mitigación en vivo
 
@@ -75,23 +83,25 @@ las pruebas y los parámetros de la mitigación están en la sección
 
 Resultados:
 
-- `results/metrics/defense_events.csv`: un evento por flujo clasificado
+- `results/events/defense_events.csv`: un evento por flujo clasificado
   (predicción, etiqueta real, inferencia, latencia, CPU, DROP).
-- `results/metrics/defense_events_battery.csv`: copia de la última
+- `results/events/defense_events_battery.csv`: copia de la última
   batería, que no se sobrescribe con las pruebas individuales.
 - `results/figures/defense/`: gráficas por tipo de tráfico y de CPU
-  frente a latencia (de la última ejecución de la batería) y matriz de
-  confusión en vivo (de todas las ejecuciones).
+  frente a latencia (de la ejecución representativa de la batería: la de
+  F1 macro más cercano a la media) y matriz de confusión en vivo (de
+  todas las ejecuciones).
 - `results/tables/`: `defense_detection_by_class.csv` (precision, recall
   y F1 por clase), `defense_battery_runs.csv` (métricas de cada
-  ejecución, con media y desviación), `defense_cpu_latency_by_traffic.csv`
-  y `defense_inference_by_traffic.csv`.
+  ejecución, con media y desviación) y
+  `defense_infrastructure_by_traffic.csv` (CPU de Ryu, latencia del plano
+  de control y tiempos de inferencia por tipo de tráfico).
 
 Para regenerar gráficas y tablas desde un CSV ya recogido, sin volver a
 lanzar la red:
 
 ```bash
-venv/bin/python3 defense/plots.py results/metrics/defense_events_battery.csv
+venv/bin/python3 defense/plots.py results/events/defense_events_battery.csv
 ```
 
 ## Dónde queda cada cosa
@@ -102,7 +112,7 @@ venv/bin/python3 defense/plots.py results/metrics/defense_events_battery.csv
 | Datos procesados | `data/processed/` |
 | Modelos | `models/` |
 | Tablas y figuras | `results/tables/`, `results/figures/` |
-| Métricas de la fase 3 | `results/metrics/` |
+| Eventos de la fase 3 (un registro por flujo clasificado) | `results/events/` |
 | Logs del controlador | `logs/ryu_controller.log` (fase 1), `logs/ryu_defense.log` (fase 3) |
 | Logs del tráfico | `logs/traffic_generator.log` (fase 1), `logs/defense_traffic.log` (fase 3) |
 | Ficheros de coordinación | `runtime/` |

@@ -1,0 +1,13 @@
+model,class,precision,recall,f1,support
+Logistic Regression,ddos,0.4552,0.6879,0.5478,60557
+Logistic Regression,normal,0.653,0.3294,0.4379,119364
+Logistic Regression,scanning,0.6615,0.7755,0.7139,74910
+Logistic Regression,spoofing,0.479,0.6699,0.5586,38326
+Decision Tree,ddos,0.6661,0.6705,0.6683,60557
+Decision Tree,normal,0.7045,0.7116,0.708,119364
+Decision Tree,scanning,0.7939,0.7865,0.7902,74910
+Decision Tree,spoofing,0.7036,0.6872,0.6953,38326
+Random Forest,ddos,0.8214,0.6962,0.7536,60557
+Random Forest,normal,0.7354,0.8745,0.799,119364
+Random Forest,scanning,0.8929,0.828,0.8592,74910
+Random Forest,spoofing,0.8779,0.697,0.7771,38326
