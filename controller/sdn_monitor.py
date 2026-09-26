@@ -88,13 +88,29 @@ class SDNFlowMonitor(app_manager.RyuApp):
         super(SDNFlowMonitor, self).__init__(*args, **kwargs)
         self.mac_to_port = {}
         self.datapaths = {}
-        # flow_key -> (packet_count, byte_count, timestamp)
-        # Guarda la lectura del ciclo anterior para calcular tasas diferenciales (pps y bps)
+        # flow_key -> (packet_count, byte_count, timestamp, flow_age)
+        # Guarda la lectura del ciclo anterior para calcular tasas diferenciales (pps y bps).
+        # flow_age (duración que reporta el switch) sirve además para
+        # detectar que un flujo ha expirado y se ha vuelto a instalar: si
+        # la duración va HACIA ATRÁS, los contadores del switch han
+        # vuelto a cero y no se puede comparar con la lectura anterior.
         self.prev_stats = {}
-        # flow_key -> (packet_count, byte_count) 
+        # flow_key -> (packet_count, byte_count)
         # Compensación para el primer paquete de un flujo: el paquete que desencadena el 
         # PacketIn no incrementa los contadores del FlowStats devuelto por el switch.
+        # Aquí se ANOTA lo que aún no se ha aplicado; al aplicarlo pasa a
+        # applied_offsets (ver abajo).
         self.pending_offsets = {}
+        # flow_key -> (packet_count, byte_count) ya aplicados a ese flujo.
+        # Existe porque la compensación debe mantenerse en TODOS los
+        # sondeos mientras el flujo viva, no solo en el primero: antes se
+        # hacía pending_offsets.pop() al escribir la fila, de modo que el
+        # primer sondeo llevaba la compensación y el siguiente ya no, y el
+        # contador acumulado BAJABA (p.ej. packet_count 1 -> 0), algo
+        # imposible en un contador de OpenFlow. Mismo criterio que
+        # pending_tcp_flags. Se descarta si el flujo se reinstala (sus
+        # contadores vuelven a cero y la compensación vieja ya no aplica).
+        self.applied_offsets = {}
         # flow_key -> flags TCP (entero, bitmask) del PRIMER paquete del
         # flujo -es el único momento en que el controlador ve el paquete
         # completo, no solo el match agregado del FlowStats-. Señal útil
@@ -584,6 +600,7 @@ class SDNFlowMonitor(app_manager.RyuApp):
         self.mac_to_port.clear()
         self.prev_stats.clear()
         self.pending_offsets.clear()
+        self.applied_offsets.clear()
         self.pending_tcp_flags.clear()
         self.pending_ip_mac_consistent.clear()
         self.pending_arp_unsolicited.clear()
@@ -659,27 +676,41 @@ class SDNFlowMonitor(app_manager.RyuApp):
             # columnas "no aplica").
             arp_unsolicited_reply = self.pending_arp_unsolicited.get(flow_key, "")
 
-            # Sumar el offset del paquete inicial consumido durante el PacketIn
-            extra_p, extra_b = self.pending_offsets.pop(flow_key, (0, 0))
-            packet_count = stat.packet_count + extra_p
-            byte_count = stat.byte_count + extra_b
-
+            # Sumar el offset de los paquetes que viajaron por PacketOut y
+            # que el switch NUNCA contó en su FlowStats. La compensación se
+            # ACUMULA y se mantiene en todos los sondeos mientras el flujo
+            # viva (ver applied_offsets en __init__); si se aplicara solo
+            # en el primero, el contador acumulado bajaría en el segundo.
+            flow_age = stat.duration_sec + stat.duration_nsec / 1e9
             prev = self.prev_stats.get(flow_key)
-            if prev and packet_count >= prev[0]:
-                prev_packets, prev_bytes, prev_time = prev
+            if prev is not None and flow_age + 1e-3 < prev[3]:
+                # La duración va hacia atrás: el switch borró el flujo
+                # (idle/hard timeout) y lo ha reinstalado con los
+                # contadores a cero. Ni la compensación acumulada ni la
+                # lectura anterior sirven ya para este flujo.
+                self.applied_offsets.pop(flow_key, None)
+                prev = None
+            new_p, new_b = self.pending_offsets.pop(flow_key, (0, 0))
+            off_p, off_b = self.applied_offsets.get(flow_key, (0, 0))
+            off_p, off_b = off_p + new_p, off_b + new_b
+            self.applied_offsets[flow_key] = (off_p, off_b)
+            packet_count = stat.packet_count + off_p
+            byte_count = stat.byte_count + off_b
+
+            if prev is not None and packet_count >= prev[0]:
+                prev_packets, prev_bytes, prev_time, _ = prev
                 dt = max(now - prev_time, 1e-6)
                 pps = max((packet_count - prev_packets) / dt, 0)
                 bps = max((byte_count - prev_bytes) / dt, 0)
             else:
                 # Estimación inicial o recuperación tras expiración/reinstalación de flujo
-                flow_age = stat.duration_sec + stat.duration_nsec / 1e9
                 if flow_age > 0:
                     pps = packet_count / flow_age
                     bps = byte_count / flow_age
                 else:
                     pps = 0.0
                     bps = 0.0
-            self.prev_stats[flow_key] = (packet_count, byte_count, now)
+            self.prev_stats[flow_key] = (packet_count, byte_count, now, flow_age)
 
             avg_pkt_size = (byte_count / packet_count) if packet_count > 0 else 0
 

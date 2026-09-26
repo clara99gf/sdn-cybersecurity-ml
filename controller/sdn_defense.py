@@ -119,7 +119,7 @@ READY_FLAG = os.path.join(config.RUNTIME_DIR, "defense_ready.flag")
 CLEAN_FLAG = os.path.join(config.RUNTIME_DIR, "defense_clean.flag")
 
 EVENT_HEADERS = [
-    "timestamp", "traffic_phase", "run", "event_type", "dpid",
+    "timestamp", "traffic_phase", "run", "dpid",
     "src", "dst", "eth_src", "eth_dst", "ip_proto", "dst_port",
     "predicted_label", "true_label",
     "inference_ms", "control_latency_ms", "mitigated",
@@ -154,8 +154,9 @@ class SDNDefense(app_manager.RyuApp):
         self.mac_to_port = {}
         self.datapaths = {}
         # Mismo estado que sdn_monitor.py, con el mismo significado:
-        self.prev_stats = {}                 # flow_key -> (pkts, bytes, t)
+        self.prev_stats = {}                 # flow_key -> (pkts, bytes, t, flow_age)
         self.pending_offsets = {}            # flow_key -> (pkts, bytes) del 1er paquete
+        self.applied_offsets = {}            # flow_key -> compensación ya aplicada
         self.pending_tcp_flags = {}
         self.pending_ip_mac_consistent = {}
         self.pending_arp_unsolicited = {}
@@ -180,7 +181,11 @@ class SDNDefense(app_manager.RyuApp):
         self._warned_missing_ports = False
         self._init_events_csv()
 
+        # Vigilante de la etiqueta: replica SDNFlowMonitor._label_watch_loop
+        # de la fase 1 (ver _label_watch_loop aquí abajo).
+        self._last_phase_key = None
         self.monitor_thread = hub.spawn(self._monitor_loop)
+        hub.spawn(self._label_watch_loop)
         if self._proc is not None:
             hub.spawn(self._cpu_loop)
         else:
@@ -356,6 +361,40 @@ class SDNDefense(app_manager.RyuApp):
                 self.logger.warning("[defense] error pidiendo estadísticas: %s", e)
             hub.sleep(POLL_INTERVAL)
 
+    def _label_watch_loop(self):
+        """Vacía las tablas en CADA set_label(), igual que hace el monitor
+        de la fase 1 (SDNFlowMonitor._label_watch_loop).
+
+        Sin esto había una diferencia real entre fases. Los generadores de
+        scanning y de ddos hacen un warmup ARP (un ping a cada objetivo)
+        ANTES de llamar a set_label(). En la fase 1, ese set_label vacía
+        las tablas, así que los flujos del warmup nunca llegan a
+        capturarse dentro de la fase de ataque. En la fase 3, al vaciar
+        solo al activar la prueba, esos pings sobrevivían (hasta 5-10 s
+        por los timeouts), se etiquetaban como ataque -el atacante es
+        actor- y el modelo, con razón, los clasificaba como normales:
+        eran el 24% de los flujos de scanning, con un recall de 0.13
+        frente a 0.80 del resto.
+
+        Se compara por (etiqueta, phase_id), como el monitor, para
+        detectar también dos fases consecutivas del mismo tipo."""
+        while True:
+            try:
+                with open(config.LABEL_FILE) as f:
+                    parts = f.read().strip().split(",")
+                key = (parts[0], parts[1] if len(parts) > 1 else "0")
+            except OSError:
+                key = None
+            if key != self._last_phase_key:
+                # Solo vacía durante una prueba: fuera de ella no hay nada
+                # que aislar, y al activar ya se vacía en _handle_transition.
+                if self._was_active and self._last_phase_key is not None:
+                    self.logger.info("[defense] Cambio de etiqueta %s -> %s: "
+                                     "vaciando tablas.", self._last_phase_key, key)
+                    self._clear_all_rules()
+                self._last_phase_key = key
+            hub.sleep(0.3)
+
     def _handle_transition(self):
         self._flush_events()
         active = os.path.exists(ACTIVE_FLAG)
@@ -401,6 +440,7 @@ class SDNDefense(app_manager.RyuApp):
         self.mac_to_port.clear()
         self.prev_stats.clear()
         self.pending_offsets.clear()
+        self.applied_offsets.clear()
         self.pending_tcp_flags.clear()
         self.pending_ip_mac_consistent.clear()
         self.pending_arp_unsolicited.clear()
@@ -604,10 +644,24 @@ class SDNDefense(app_manager.RyuApp):
             return None
         fk = self._flow_key(dpid, m.get)
 
-        # Contadores con la compensación del primer paquete (como el monitor).
-        extra_p, extra_b = self.pending_offsets.pop(fk, (0, 0))
-        packet_count = stat.packet_count + extra_p
-        byte_count = stat.byte_count + extra_b
+        # Contadores con la compensación del primer paquete (como el
+        # monitor): se ACUMULA y se mantiene mientras el flujo viva, no
+        # solo en el primer sondeo -si no, el contador acumulado bajaría
+        # (packet_count 1 -> 0) y el cálculo de tasas se iría a la rama de
+        # reinstalación-. Si la duración va hacia atrás, el switch ha
+        # reinstalado el flujo con los contadores a cero y se descarta
+        # tanto la compensación acumulada como la lectura anterior.
+        age = stat.duration_sec + stat.duration_nsec / 1e9
+        prev = self.prev_stats.get(fk)
+        if prev is not None and age + 1e-3 < prev[3]:
+            self.applied_offsets.pop(fk, None)
+            prev = None
+        new_p, new_b = self.pending_offsets.pop(fk, (0, 0))
+        off_p, off_b = self.applied_offsets.get(fk, (0, 0))
+        off_p, off_b = off_p + new_p, off_b + new_b
+        self.applied_offsets[fk] = (off_p, off_b)
+        packet_count = stat.packet_count + off_p
+        byte_count = stat.byte_count + off_b
 
         # Tasas: MISMO cálculo que sdn_monitor.py. Antes aquí se indexaba
         # por (ip_src, ip_dst, eth_src, eth_dst), con lo que flujos
@@ -615,16 +669,14 @@ class SDNDefense(app_manager.RyuApp):
         # y salían tasas imposibles (100.000-7.000.000 pkt/s); y un flujo
         # visto por primera vez tenía tasa 0 en vez de la estimación por
         # edad que usa el dataset.
-        prev = self.prev_stats.get(fk)
-        if prev and packet_count >= prev[0]:
+        if prev is not None and packet_count >= prev[0]:
             dt = max(now - prev[2], 1e-6)
             pps = max((packet_count - prev[0]) / dt, 0)
             bps = max((byte_count - prev[1]) / dt, 0)
         else:
-            age = stat.duration_sec + stat.duration_nsec / 1e9
             pps = packet_count / age if age > 0 else 0.0
             bps = byte_count / age if age > 0 else 0.0
-        self.prev_stats[fk] = (packet_count, byte_count, now)
+        self.prev_stats[fk] = (packet_count, byte_count, now, age)
 
         raw = {
             "eth_type": eth_type,
@@ -672,9 +724,8 @@ class SDNDefense(app_manager.RyuApp):
                 header = EVENT_HEADERS
             if header == EVENT_HEADERS:
                 return
-        if True:
-            with open(EVENTS_CSV, "w", newline="") as f:
-                csv.writer(f).writerow(EVENT_HEADERS)
+        with open(EVENTS_CSV, "w", newline="") as f:
+            csv.writer(f).writerow(EVENT_HEADERS)
 
     def _record_event(self, now, phase, run, dpid, raw, label, true_label,
                       infer_ms, latency_ms, mitigated, wfeats):
@@ -683,7 +734,7 @@ class SDNDefense(app_manager.RyuApp):
         dst_port = raw.get("tcp_dst_port") or raw.get("udp_dst_port") or -1
         row = [
             datetime.now().isoformat(timespec="milliseconds"),
-            phase, run, "classify", f"{dpid:016x}",
+            phase, run, f"{dpid:016x}",
             src, dst, raw.get("eth_src") or "", raw.get("eth_dst") or "",
             raw.get("ip_proto") if raw.get("ip_proto") is not None else "",
             dst_port, label, true_label,

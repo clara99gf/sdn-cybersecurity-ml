@@ -31,7 +31,14 @@ from functools import partial
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config
 
-CONTROLLER = os.path.join("controller", "sdn_defense.py")
+# Ruta ABSOLUTA: antes era relativa y solo funcionaba lanzando el script
+# desde la raíz del proyecto.
+CONTROLLER = os.path.join(config.CONTROLLER_DIR, "sdn_defense.py")
+
+# Las pruebas sueltas escriben su gráfica aquí, separadas de las de la
+# batería (results/figures/defense/), que son las de la memoria.
+SINGLE_FIGURES_DIR = os.path.join(config.PROJECT_ROOT, "results", "figures",
+                                  "defense", "single")
 EVENTS_CSV = os.path.join(config.PROJECT_ROOT, "results", "events", "defense_events.csv")
 # Archivo-interruptor que activa la detección/mitigación en el controlador
 # (ver ACTIVE_FLAG en sdn_defense.py). Solo existe mientras corre una prueba.
@@ -365,8 +372,9 @@ def _print_summary():
       - ataques: recall (de los flujos que SON ese ataque, cuántos se
         detectan), tiempo hasta la primera mitigación (desde el primer
         flujo del ataque visto por el controlador hasta el primer DROP
-        sobre ese ataque, media entre ejecuciones; con 2 confirmaciones y
-        un sondeo por segundo el mínimo posible es ~1 s) y nº de DROP.
+        sobre ese ataque, media entre ejecuciones; con un sondeo por
+        segundo, el mínimo posible es del orden de
+        DEFENSE_MITIGATION_CONFIRMATIONS - 1 segundos) y nº de DROP.
     La precisión y el F1 van en el bloque global: solo tienen sentido con
     las cuatro clases juntas (batería).
     """
@@ -437,8 +445,11 @@ def _print_summary():
                     std = (sum((x - media) ** 2 for x in vals) / len(vals)) ** 0.5
                     print(f"             {nombre} por ejecución: media {media:.3f} ± {std:.3f} "
                           f"(mín {min(vals):.3f}, máx {max(vals):.3f})")
-            print("             detalle: results/tables/defense_detection_by_class.csv"
+            print("             detección: results/tables/defense_detection_by_class.csv"
                   + (" y defense_battery_runs.csv" if len(completas) > 1 else ""))
+            print("             mitigación: results/tables/"
+                  "defense_mitigation_by_conversation.csv (por conversación, que es"
+                  " la unidad en la que decide el controlador)")
         except Exception as e:
             print(f"  (no se pudieron calcular las métricas globales: {e})")
     print("=" * 72 + "\n")
@@ -496,14 +507,22 @@ def _make_plots():
         print(f"*** Las métricas están a salvo en {EVENTS_CSV}.")
 
 
-def _reset_all(silent=False):
-    """Borra TODO lo de tandas anteriores: el CSV de eventos, las
-    gráficas de la fase 3 y las tablas de la fase 3. Así cada prueba
-    (individual o batería) empieza de cero y no se mezclan resultados.
+
+def _reset_all(silent=False, single=False):
+    """Borra lo de tandas anteriores para que cada prueba empiece de cero.
+
+    single=True (pruebas sueltas del menú): borra el CSV de eventos y solo
+    las gráficas de results/figures/defense/single/, su propia carpeta. NO
+    toca las gráficas ni las tablas de la batería, que son las que van a
+    la memoria y están versionadas -antes, probar la opción 2 las borraba
+    todas y había que regenerarlas-.
+    single=False (batería): borra además las gráficas y tablas de la
+    batería, que es la que las genera.
     El controlador repone la cabecera del CSV en el siguiente evento
     (ver _init_events_csv en sdn_defense.py)."""
     import glob
-    figs_dir = os.path.join(config.PROJECT_ROOT, "results", "figures", "defense")
+    figs_dir = (SINGLE_FIGURES_DIR if single
+                else os.path.join(config.PROJECT_ROOT, "results", "figures", "defense"))
     tables_dir = os.path.join(config.PROJECT_ROOT, "results", "tables")
     if os.path.exists(EVENTS_CSV):
         os.remove(EVENTS_CSV)
@@ -512,11 +531,12 @@ def _reset_all(silent=False):
             os.remove(p)
         except OSError:
             pass
-    for p in glob.glob(os.path.join(tables_dir, "defense_*.csv")):
-        try:
-            os.remove(p)
-        except OSError:
-            pass
+    if not single:
+        for p in glob.glob(os.path.join(tables_dir, "defense_*.csv")):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
     if not silent:
         print("*** Métricas, gráficas y tablas anteriores borradas.")
 
@@ -615,6 +635,9 @@ def main():
         print("\n*** Interrumpido por el usuario.")
     finally:
         _cleanup(controller_proc, net)
+        # Devolver al usuario la propiedad de lo escrito con sudo: si no,
+        # la fase 2 y defense/plots.py (que van sin sudo) no podrían escribir.
+        config.restore_ownership()
         print("\n*** Fin de la fase de detección y mitigación.")
         # Se anuncian las salidas solo si REALMENTE hay algo que mirar:
         # eventos registrados, gráficas o tablas. Si no, se dice y ya -no

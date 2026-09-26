@@ -1,11 +1,17 @@
 # Entorno virtual
 venv/
+.venv/
 
 # Python
 __pycache__/
 *.pyc
 *.pyo
 *.egg-info/
+# Subproductos de "pip install -e ." y de empaquetado
+build/
+dist/
+.eggs/
+*.egg-link
 
 # Dataset generado: SÍ se sube a git a propósito (~4-5h de generación,
 # el tribunal del TFG no debería tener que regenerarlo para revisar el
@@ -13,6 +19,8 @@ __pycache__/
 # ml/preprocessing.py, no aporta nada tenerlo versionado-.
 data/processed/*
 !data/processed/.gitkeep
+# Copias con timestamp del dataset (config.ARCHIVE_PREVIOUS_DATASET)
+data/dataset_sdn_*.csv
 logs/*
 !logs/.gitkeep
 runtime/*
@@ -22,7 +30,8 @@ runtime/*
 # random_forest.pkl pesa ~245MB sin límite de profundidad -supera el
 # límite de 100MB de GitHub-. results/ (tablas y gráficas, evidencia
 # directa para el tribunal) SÍ se sube -pesa poco y no requiere
-# ejecutar nada para verlo-.
+# ejecutar nada para verlo-, incluido results/events/ con el registro
+# por flujo de la última batería (~3MB).
 models/*
 !models/.gitkeep
 
@@ -33,3 +42,5 @@ models/*
 .vscode/
 .idea/
 .DS_Store
+*.swp
+.ipynb_checkpoints/

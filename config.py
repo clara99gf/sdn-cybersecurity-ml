@@ -124,13 +124,14 @@ TOTAL_DURATION = 23700
 MIN_PHASE_DURATION = 10         
 MAX_PHASE_DURATION = 25
 
-# Límite de filas que puede aportar UNA SOLA fase.
-# 500 (bajado desde 800): con POLL_INTERVAL=1s cada fase genera muchas
-# más filas, y con el techo más alto una tirada de 150.000 se agotaba en
-# solo ~400 fases -pocas para GroupKFold, que gana fiabilidad cuantos
-# más grupos independientes tenga-. Con 500 se esperan ~600-700 fases
-# para el mismo volumen, sin perder la mejora de captura del sondeo
-# rápido.
+# Límite de filas que puede aportar UNA SOLA fase, comprobado ENTRE
+# acciones del generador (no puede interrumpir una acción en curso).
+# Por eso es un tope aproximado, no estricto: medido sobre el dataset
+# final, 236 de las 920 fases superan las 500 filas y la mayor llega a
+# 4.064 (un nmap o un hping3 lanzado justo antes de comprobarlo sigue
+# generando flujos hasta terminar). La mediana sí queda en 270 filas.
+# Su efecto real es acotar la contribución de las fases más productivas
+# para que GroupKFold tenga muchos grupos independientes.
 MAX_ROWS_PER_PHASE = 500
 
 # Tiempo de espera entre fases para permitir que finalice el tráfico anterior (segundos)
@@ -196,6 +197,37 @@ TEST_SIZE = 0.2
 # lineal aprovecha cualquier señal extra; Random Forest ya descarta por
 # su cuenta lo irrelevante. No cambia qué modelo gana.)
 N_FEATURES = 15
+
+# Ventana temporal (segundos) de las 4 características de "patrón entre
+# flujos" (distinct_ports_by_src, distinct_targets_by_src,
+# flows_to_target, distinct_sources_to_target).
+#
+# Vive AQUÍ, y no en cada módulo, porque la usan dos sitios que tienen
+# que coincidir obligatoriamente: ml/preprocessing.py (modo lote, al
+# preparar el dataset) y controller/live_classifier.py (modo evento, en
+# la detección en vivo). Si no coincidieran, el modelo vería en
+# detección una característica calculada de otra forma que al entrenar.
+# Antes el 5 estaba escrito a mano en los dos ficheros.
+#
+# COMPROBADO sobre el dataset completo (887 fases, GroupKFold de 5
+# particiones, Random Forest): 5s da F1 macro 0.7258 y 2s da 0.7201.
+# La diferencia (0.006) queda muy por debajo de la desviación entre
+# particiones (0.025), así que las dos ventanas son equivalentes en la
+# práctica. Se mantiene 5s por ser del orden de FLOW_IDLE_TIMEOUT (5s)
+# y quedar muy por debajo de la duración mínima de fase (10s), de modo
+# que la ventana nunca mezcla dos fases distintas.
+#
+# (La motivación para probar 2s era que con 5s los contadores se
+# saturan: la mediana de distinct_sources_to_target es 30 y la de
+# distinct_targets_by_src es 15 en las CUATRO clases. Desaturarlos no
+# se tradujo en mejor rendimiento, pero la saturación sigue siendo un
+# dato a tener en cuenta al interpretar la importancia de esas
+# características.)
+#
+# OJO: da nombre a las columnas (distinct_ports_by_src_<W>s), así que
+# cambiarla obliga a repetir el preprocesado Y el entrenamiento -los
+# .pkl de models/ guardan los nombres antiguos-.
+WINDOW_SECONDS = 5
 
 TARGET_COLUMN = "label"
 
@@ -283,11 +315,29 @@ DEFENSE_DROP_TIMEOUT = 20
 
 # Nº de sondeos DISTINTOS en los que una conversación (MAC origen ->
 # MAC destino) debe clasificarse como ataque, dentro de
-# DEFENSE_CONFIRM_WINDOW_S segundos, antes de bloquearla. Con 1, un
-# fallo puntual del modelo corta una conversación legítima; con 2, un
-# error aislado no basta y un ataque real (sostenido) se confirma en
-# ~1-2 s.
-DEFENSE_MITIGATION_CONFIRMATIONS = 2
+# DEFENSE_CONFIRM_WINDOW_S segundos, antes de bloquearla. Es el mando
+# que gobierna el compromiso entre seguridad y disponibilidad: cuantas
+# más confirmaciones se exijan, menos tráfico legítimo se corta por un
+# error puntual del modelo, pero más tarde (y más raramente) se bloquea
+# un ataque real.
+#
+# MEDIDO sobre la batería de 10 ejecuciones (557 conversaciones, de las
+# que 384 eran de ataque y 128 legítimas en las pruebas de tráfico
+# normal), simulando la misma lógica con distintos valores:
+#
+#   confirmaciones | legítimas bloqueadas | ataques bloqueados | prec | recall
+#         1        |  (no medido; un solo error del modelo basta)
+#         2        |      48 de 128       |    380 de 384      | .888 | .990
+#         3        |      31 de 128       |    366 de 384      | .922 | .953
+#         4        |      16 de 128       |    358 de 384      | .957 | .932
+#
+# Se elige 3: reduce en un 35% las conversaciones legítimas cortadas
+# (cada corte deja a dos hosts sin hablarse DEFENSE_DROP_TIMEOUT
+# segundos, que es el daño real del sistema) a cambio de dejar sin
+# bloquear 14 conversaciones de ataque más de 384. Con 4 el daño baja
+# otro tanto, pero ya se escapan 26 ataques, y en un IPS perder ataques
+# pesa más que cortar de más.
+DEFENSE_MITIGATION_CONFIRMATIONS = 3
 DEFENSE_CONFIRM_WINDOW_S = 5
 
 # Margen tras activar una prueba durante el que el controlador descarta
@@ -305,3 +355,24 @@ DEFENSE_ACTIVATION_GRACE_S = 2 * POLL_INTERVAL + 0.5
 # la desviación entre las particiones de GroupKFold. Con 10 cada variante
 # aparece varias veces (~25 min en total); 5 sirve para pruebas (~12 min).
 DEFENSE_BATTERY_RUNS = 10
+
+
+def restore_ownership():
+    """Devuelve la propiedad de los directorios de salida al usuario que
+    invocó sudo.
+
+    Las fases 1 y 3 necesitan root (Mininet), así que todo lo que crean
+    pertenece a root. Luego la fase 2 y defense/plots.py, que se ejecutan
+    SIN sudo, no pueden escribir ahí y fallan con PermissionError. Esto se
+    llama al terminar esas fases para dejar el proyecto utilizable con el
+    usuario normal. Sin sudo (o si algo falla) no hace nada."""
+    uid, gid = os.environ.get("SUDO_UID"), os.environ.get("SUDO_GID")
+    if not uid or not gid:
+        return
+    import subprocess
+    for d in (DATA_DIR, LOGS_DIR, RUNTIME_DIR, MODELS_DIR, RESULTS_DIR):
+        try:
+            subprocess.run(["chown", "-R", f"{uid}:{gid}", d],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass

@@ -24,6 +24,7 @@ Equivale a ejecutar, en este orden:
 """
 import sys
 import time
+import traceback
 
 import preprocessing
 import train
@@ -45,6 +46,9 @@ def main():
             step_fn()
         except Exception as e:
             print(f"\n[ERROR] Fallo en '{name}': {e}")
+            # Traza completa: sin ella, un error solo dice el mensaje y no
+            # dónde se produjo.
+            traceback.print_exc()
             print(f"[run_02_ml] Deteniendo -no tiene sentido seguir con el "
                   f"siguiente paso si '{name}' no ha terminado bien-.")
             sys.exit(1)

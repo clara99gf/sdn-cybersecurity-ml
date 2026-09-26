@@ -1,0 +1,6 @@
+traffic_phase,conversations,attack_conversations,attack_blocked,attack_not_blocked,legit_blocked,drops,first_mitigation_s,runs_with_mitigation,block_precision,block_recall,block_f1
+normal,128,0,0,0,32,32,,0/10,,,
+scanning,299,283,282,1,1,300,2.51,10/10,,,
+ddos,74,60,60,0,0,119,2.1,10/10,,,
+spoofing,86,68,65,3,0,96,2.0,10/10,,,
+total,587,411,407,4,33,547,,,0.925,0.99,0.957

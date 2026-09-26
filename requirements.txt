@@ -1,0 +1,33 @@
+# Versiones exactas con las que se obtuvieron los resultados del TFG.
+#
+# Este fichero DOCUMENTA el entorno; no es lo que instala setup.sh (que
+# usa las dependencias declaradas en setup.py, sin fijar versiones, para
+# que la instalación no falle en máquinas con otra versión de Python).
+# Para replicar el entorno original: ./venv/bin/pip install -r requirements.txt
+#
+# NO instalables con pip (los instala setup.sh con apt):
+#   mininet, openvswitch-switch, nmap, hping3, iperf, iputils-ping
+#
+# Presentes a nivel de SISTEMA, visibles desde el venv porque se creó con
+# --system-site-packages (no se fijan aquí para no forzar una
+# reinstalación dentro del venv que podría romper la compatibilidad):
+#   ryu 4.34         (/usr/local/lib/python3.10/dist-packages)
+#   eventlet 0.41.2  (dependencia de ryu, misma ubicación)
+#   matplotlib 3.5.1 (/usr/lib/python3/dist-packages, instalado con apt)
+#
+# Restricción importante: numpy debe ser < 2 por compatibilidad binaria
+# con scipy (setup.sh la fuerza explícitamente).
+#
+# Entorno de referencia: Ubuntu con Python 3.10.
+
+cloudpickle==3.1.2
+joblib==1.6.0
+numpy==1.26.4
+pandas==2.3.3
+psutil==7.2.2
+python-dateutil==2.9.0.post0
+scapy==2.7.0
+scikit-learn==1.7.2
+scipy==1.15.3
+threadpoolctl==3.6.0
+tzdata==2026.3

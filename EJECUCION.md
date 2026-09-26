@@ -8,6 +8,11 @@ Las fases 1 y 3 usan Mininet y necesitan `sudo`. Se lanzan siempre con
 ignora el venv activado; con la ruta explícita se usa el Python del venv
 con permisos de root.
 
+El orden importa: cada fase consume lo que deja la anterior. La 2
+necesita el CSV de la 1, y la 3 necesita los modelos de la 2. Si solo
+quieres revisar los resultados, el repositorio ya los trae generados y
+no hace falta ejecutar nada.
+
 ## Fase 1: generación del dataset
 
 ```bash
@@ -16,7 +21,7 @@ sudo venv/bin/python3 run_01_dataset.py
 
 Arranca el controlador Ryu (`controller/sdn_monitor.py`), levanta la
 topología, genera fases de tráfico aleatorias hasta alcanzar
-`TARGET_ROWS` (300.000 filas, unas 5 horas) y al terminar, o con
+`TARGET_ROWS` (300.000 filas, unas 4 horas) y al terminar, o con
 `Ctrl+C`, detiene el controlador y limpia Mininet. Si el controlador no
 arranca, muestra en la terminal las últimas líneas de su log.
 
@@ -46,19 +51,21 @@ venv/bin/python3 ml/run_02_ml.py
 ```
 
 Equivale a ejecutar en orden `ml/preprocessing.py`, `ml/train.py` y
-`ml/evaluate.py` (se pueden lanzar por separado para depurar).
+`ml/evaluate.py` (se pueden lanzar por separado para depurar). Tarda
+unos tres minutos.
 
 Genera `data/processed/`, los modelos en `models/` (incluido
 `best_model.pkl`, el que usa la fase 3) y, en `results/tables/` y
 `results/figures/`:
 
-- `dataset_summary.csv`: descripción del dataset (flujos, fases y
-  protocolos por clase).
-- `feature_importances.csv` y `.png`: en qué se fija el modelo.
-- `metrics_comparison.csv` y `.png`: comparativa de los tres modelos.
-- `metrics_by_class.csv`: precision, recall y F1 por clase de cada modelo.
-- `confusion_matrix_*.png`: una matriz por modelo.
-- `computational_cost.csv` y `.png`: entrenamiento e inferencia.
+| Fichero | Qué contiene |
+|---|---|
+| `dataset_summary.csv` | Descripción del dataset: flujos, fases y protocolos por clase |
+| `feature_importances.csv` / `.png` | Importancia de cada característica y cuáles se seleccionaron |
+| `metrics_comparison.csv` / `.png` | Accuracy, precisión, recall y F1 de los tres modelos |
+| `metrics_by_class.csv` | Precisión, recall y F1 por clase, de cada modelo |
+| `confusion_matrix_*.png` | Una matriz de confusión por modelo (predicciones out-of-fold) |
+| `computational_cost.csv` / `.png` | Tiempo de entrenamiento y de inferencia por modelo |
 
 ## Fase 3: detección y mitigación en vivo
 
@@ -68,34 +75,59 @@ Requiere haber ejecutado antes la fase 2 (artefactos en `models/`).
 sudo venv/bin/python3 run_03_defense.py
 ```
 
-Arranca el controlador de defensa (`controller/sdn_defense.py`) y la red,
-y abre un menú:
+Arranca el controlador de defensa (`controller/sdn_defense.py`) y la red.
+Antes del menú hace dos `pingAll`: el primero es de calentamiento (puebla
+las cachés ARP y hace que el controlador aprenda las MAC) y el segundo es
+la comprobación real, que debe salir con 0 % de pérdida.
 
 | Opción | Qué hace |
 |---|---|
 | 1-4 | Prueba individual de 30 s con un solo tipo de tráfico (normal, scanning, ddos o spoofing): resumen en terminal y su gráfica |
-| 5 | Batería completa: los cuatro tipos seguidos, repetidos `DEFENSE_BATTERY_RUNS` veces (10 por defecto, unos 25 minutos). Resumen global con F1 y recall macro (media ± desviación entre ejecuciones), todas las gráficas y las tablas |
+| 5 | Batería completa: los cuatro tipos seguidos, repetidos `DEFENSE_BATTERY_RUNS` veces (10 por defecto, unos 25 minutos). Resumen global, todas las gráficas y las tablas |
 | 6 | Salir limpiando el entorno |
 
 Cada opción borra los resultados anteriores de la fase 3. La duración de
 las pruebas y los parámetros de la mitigación están en la sección
 "Fase 3" de `config.py`.
 
-Resultados:
+### Resultados de la fase 3
 
-- `results/events/defense_events.csv`: un evento por flujo clasificado
-  (predicción, etiqueta real, inferencia, latencia, CPU, DROP).
-- `results/events/defense_events_battery.csv`: copia de la última
-  batería, que no se sobrescribe con las pruebas individuales.
-- `results/figures/defense/`: gráficas por tipo de tráfico y de CPU
-  frente a latencia (de la ejecución representativa de la batería: la de
-  F1 macro más cercano a la media) y matriz de confusión en vivo (de
-  todas las ejecuciones).
-- `results/tables/`: `defense_detection_by_class.csv` (precision, recall
-  y F1 por clase), `defense_battery_runs.csv` (métricas de cada
-  ejecución, con media y desviación) y
-  `defense_infrastructure_by_traffic.csv` (CPU de Ryu, latencia del plano
-  de control y tiempos de inferencia por tipo de tráfico).
+**Registro por flujo** (`results/events/`):
+
+| Fichero | Qué contiene |
+|---|---|
+| `defense_events.csv` | Un evento por flujo clasificado: predicción, etiqueta real, tiempo de inferencia, latencia, CPU y si se aplicó DROP. Lo reescribe cualquier prueba |
+| `defense_events_battery.csv` | Copia de la última batería completa. Idéntico al anterior justo después de lanzar la opción 5; se diferencia en cuanto se lanza una prueba individual, que sobrescribe `defense_events.csv` pero no esta copia |
+
+**Tablas** (`results/tables/`). Las dos primeras responden preguntas
+distintas y no deben confundirse: la detección mide si el modelo acierta
+la etiqueta de cada flujo; la mitigación, si el controlador bloquea lo
+que debe. Se separan porque el bloqueo altera el tráfico que se está
+midiendo.
+
+| Fichero | Qué contiene |
+|---|---|
+| `defense_detection_by_class.csv` | **Detección**: precisión, recall y F1 por clase, por flujo. Comparable con la fase 2 |
+| `defense_mitigation_by_conversation.csv` | **Mitigación**: conversaciones de ataque bloqueadas, conversaciones legítimas bloqueadas por error, nº de DROP y tiempo hasta el primer bloqueo |
+| `defense_recall_around_drop.csv` | Recall por flujo antes y después del primer DROP: explica por qué las dos tablas anteriores dan números distintos |
+| `defense_battery_runs.csv` | Métricas macro de cada ejecución de la batería, con media y desviación |
+| `defense_infrastructure_by_traffic.csv` | CPU de Ryu, latencia del plano de control y tiempos de inferencia por tipo de tráfico |
+
+**Figuras** (`results/figures/defense/`):
+
+| Fichero | Qué contiene |
+|---|---|
+| `confusion_matrix_live.png` | Matriz de confusión de la detección en vivo, con todas las ejecuciones |
+| `offline_vs_live_by_class.png` | Recall y F1 por clase, offline frente a en vivo (necesita la fase 2 ejecutada) |
+| `scanning_ports.png`, `spoofing_detected.png` | Flujos reales del ataque frente a los detectados por el modelo, acumulados, con los instantes de bloqueo |
+| `ddos_pkt_rate.png` | Tasa de paquetes del DDoS: se ve el ataque cortado tras el DROP y su reaparición al expirar la regla |
+| `normal_pkt_rate.png` | Tasa de paquetes del tráfico legítimo con los bloqueos erróneos marcados |
+| `cpu_vs_latency.png` | CPU de Ryu y latencia del plano de control durante cada tipo de prueba |
+
+Las gráficas por tipo de tráfico y la de CPU corresponden a la ejecución
+representativa de la batería (aquella cuyo F1 macro está más cerca de la
+media); la matriz de confusión y la comparativa offline/en vivo usan
+todas las ejecuciones.
 
 Para regenerar gráficas y tablas desde un CSV ya recogido, sin volver a
 lanzar la red:
@@ -118,8 +150,10 @@ venv/bin/python3 defense/plots.py results/events/defense_events_battery.csv
 | Ficheros de coordinación | `runtime/` |
 
 Todo se guarda dentro del proyecto (no en `/tmp`) para que sea visible
-con el usuario normal aunque se ejecute con `sudo`. Las rutas se
-configuran en `config.py`.
+con el usuario normal aunque se ejecute con `sudo`. Al terminar, las
+fases 1 y 3 devuelven la propiedad de esos directorios al usuario que
+lanzó `sudo`, para que la fase 2 (que va sin `sudo`) pueda escribir en
+ellos. Las rutas se configuran en `config.py`.
 
 ## Si algo se queda colgado
 

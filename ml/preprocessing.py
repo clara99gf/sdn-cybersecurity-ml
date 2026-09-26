@@ -85,15 +85,11 @@ from sklearn.preprocessing import LabelEncoder
 from ml.utils import save_artifact, save_full_dataset
 
 # Ventana temporal (segundos) para las características de patrón entre
-# flujos. Se mantiene en 5s tras subir la frecuencia de sondeo
-# (POLL_INTERVAL 2s -> 1s) y FLOW_IDLE_TIMEOUT (3s -> 5s): la ventana
-# mide TIEMPO REAL, no número de sondeos, así que "5 segundos de
-# actividad reciente" sigue significando lo mismo -lo que cambia es que
-# ahora esos 5s contienen más filas, es decir, MÁS información sobre el
-# mismo intervalo, que es justo lo que se buscaba-. Sigue siendo del
-# orden de FLOW_IDLE_TIMEOUT (5s) y muy por debajo de la duración
-# mínima de fase (10s), así que no mezcla fases distintas.
-WINDOW_SECONDS = 5
+# flujos. El valor vive en config.py porque el clasificador en vivo
+# (controller/live_classifier.py) tiene que usar EXACTAMENTE el mismo:
+# si no, el modelo vería en detección una característica calculada de
+# otra forma que al entrenar. Allí está el porqué del valor elegido.
+WINDOW_SECONDS = config.WINDOW_SECONDS
 
 # Interruptor para poder reproducir la comparación "con vs. sin
 # características de ventana temporal" (ablation study) cuando se
@@ -258,12 +254,19 @@ def drop_constant_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df.drop(columns=cols_present)
 
 
-def clean_nulls_and_infinites(df: pd.DataFrame) -> pd.DataFrame:
+def clean_nulls_and_infinites(df: pd.DataFrame, groups: np.ndarray = None):
+    """Devuelve (df, groups). groups se filtra igual que las filas: si se
+    elimina una fila y no se elimina su grupo, X y groups quedan
+    desalineados y GroupKFold agruparía por la fase equivocada. Hoy no se
+    elimina ninguna fila, pero el desajuste sería silencioso."""
     # Infinitos en las tasas derivadas (indeterminaciones aritméticas
     # reales) -> se tratan como NaN y esas filas se eliminan.
     before = len(df)
     df[config.RATE_COLUMNS] = df[config.RATE_COLUMNS].replace([np.inf, -np.inf], np.nan)
-    df = df.dropna(subset=config.RATE_COLUMNS)
+    mask = df[config.RATE_COLUMNS].notna().all(axis=1)
+    df = df[mask]
+    if groups is not None:
+        groups = np.asarray(groups)[mask.to_numpy()]
     if before != len(df):
         print(f"[preprocessing] Filas con tasas nulas/infinitas eliminadas: {before - len(df)}")
 
@@ -273,7 +276,7 @@ def clean_nulls_and_infinites(df: pd.DataFrame) -> pd.DataFrame:
     # que una fila IP nunca tiene campos ARP y viceversa-.
     struct_cols = [c for c in config.STRUCTURAL_NA_COLUMNS if c in df.columns]
     df[struct_cols] = df[struct_cols].fillna(0)
-    return df
+    return df, groups
 
 
 def reconstruct_phase_groups(df: pd.DataFrame) -> np.ndarray:
@@ -398,7 +401,7 @@ def main(include_window_features: bool = INCLUDE_TEMPORAL_WINDOW_FEATURES):
     summarize_dataset(df, groups)
     df = drop_identifier_columns(df)
     df = drop_constant_columns(df)
-    df = clean_nulls_and_infinites(df)
+    df, groups = clean_nulls_and_infinites(df, groups)
     df, encoders = encode_categoricals(df)
 
     y_raw = df[config.TARGET_COLUMN]

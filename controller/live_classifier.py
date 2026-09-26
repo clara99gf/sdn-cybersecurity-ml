@@ -12,7 +12,7 @@ en detección igual que se habría clasificado durante el entrenamiento.
 Las 4 características de ventana temporal se calculan con el MISMO módulo
 compartido (feature_windows.WindowTracker) que usa el preprocesado; aquí
 los WindowTracker se alimentan en cada sondeo del controlador, no en
-lote. Esto garantiza que la feature "distinct_ports_by_src_5s" (etc.)
+lote. Esto garantiza que la feature "distinct_ports_by_src" (etc.)
 signifique lo mismo en entrenamiento y en detección.
 
 Carga los artefactos que guarda ml/train.py:
@@ -52,6 +52,13 @@ import config
 from feature_windows import WindowTracker
 from ml.utils import load_artifact
 
+# Ventana temporal de las 4 características de patrón entre flujos.
+# Se lee de config.py, igual que hace ml/preprocessing.py: los dos
+# TIENEN que usar el mismo valor, porque da nombre a las columnas y
+# define el cálculo. Escrito a mano en los dos sitios era cuestión de
+# tiempo que se desincronizaran.
+_W = config.WINDOW_SECONDS
+
 # Orden EXACTO de columnas tal y como las ve el modelo tras el
 # preprocesado (ver ml/preprocessing.py). Debe coincidir una a una.
 FEATURE_ORDER = [
@@ -60,8 +67,8 @@ FEATURE_ORDER = [
     "arp_unsolicited_reply", "arp_opcode", "duration_sec", "duration_nsec",
     "packet_count", "byte_count", "packet_count_per_second",
     "byte_count_per_second", "avg_packet_size", "flow_count_per_dpid",
-    "distinct_ports_by_src_5s", "distinct_targets_by_src_5s",
-    "flows_to_target_5s", "distinct_sources_to_target_5s",
+    f"distinct_ports_by_src_{_W}s", f"distinct_targets_by_src_{_W}s",
+    f"flows_to_target_{_W}s", f"distinct_sources_to_target_{_W}s",
 ]
 
 # Valor de relleno para huecos estructurales numéricos (mismo criterio
@@ -72,7 +79,7 @@ FILL = 0
 
 class LiveClassifier:
     def __init__(self, model_name="best_model.pkl", window_s=None):
-        self.window_s = window_s if window_s is not None else 5
+        self.window_s = window_s if window_s is not None else _W
         # best_model.pkl lo crea ml/evaluate.py (el mejor de los 3). Si
         # aún no se ha ejecutado la evaluación, se recurre a
         # random_forest.pkl, que es el que suele ganar.
@@ -225,10 +232,10 @@ class LiveClassifier:
             "byte_count_per_second": _num(raw.get("byte_count_per_second")),
             "avg_packet_size": _num(raw.get("avg_packet_size")),
             "flow_count_per_dpid": _num(raw.get("flow_count_per_dpid")),
-            "distinct_ports_by_src_5s": dports,
-            "distinct_targets_by_src_5s": dtargets,
-            "flows_to_target_5s": f2t,
-            "distinct_sources_to_target_5s": dsources,
+            f"distinct_ports_by_src_{_W}s": dports,
+            f"distinct_targets_by_src_{_W}s": dtargets,
+            f"flows_to_target_{_W}s": f2t,
+            f"distinct_sources_to_target_{_W}s": dsources,
         }
         # Vector completo en el orden del entrenamiento, escalado.
         vec = np.array([[row[c] for c in FEATURE_ORDER]], dtype=float)

@@ -185,12 +185,32 @@ def plot_confusion_matrix(cm, class_names, model_display_name, out_path):
 
 
 def plot_cost_bar(cost_df, out_path):
-    ax = cost_df.set_index("model")[["training_time_s", "inference_time_ms_per_flow"]].plot(
-        kind="bar", figsize=(8, 5), rot=0, logy=True,
-    )
-    ax.set_ylabel("Tiempo (escala log; entrenamiento en s, inferencia en ms/flujo)")
-    ax.set_title("Coste computacional por modelo")
-    plt.tight_layout()
+    """Coste computacional por modelo, en DOS PANELES.
+
+    Antes era un solo gráfico con las dos series en el mismo eje
+    logarítmico, y eso mezclaba unidades distintas (segundos de
+    entrenamiento frente a milisegundos por flujo): comparar la altura de
+    unas barras con las otras no significaba nada. Con un panel por
+    métrica, cada una tiene su escala y su unidad, y la comparación que se
+    lee es la que tiene sentido: la de los tres modelos entre sí.
+
+    El panel de inferencia va en escala logarítmica porque entre modelos
+    hay dos órdenes de magnitud de diferencia; en lineal, las barras de
+    los dos modelos rápidos serían invisibles."""
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4.5))
+    modelos = cost_df["model"]
+    ax1.bar(modelos, cost_df["training_time_s"], color="#2980b9")
+    ax1.set_ylabel("Segundos")
+    ax1.set_title("Tiempo de entrenamiento (dataset completo)")
+    ax2.bar(modelos, cost_df["inference_time_ms_per_flow"], color="#e67e22")
+    ax2.set_yscale("log")
+    ax2.set_ylabel("ms por flujo (escala log)")
+    ax2.set_title("Tiempo de inferencia")
+    for ax in (ax1, ax2):
+        ax.tick_params(axis="x", rotation=15)
+        ax.grid(axis="y", alpha=0.25)
+    fig.suptitle("Coste computacional por modelo")
+    fig.tight_layout()
     plt.savefig(out_path, dpi=150)
     plt.close()
 

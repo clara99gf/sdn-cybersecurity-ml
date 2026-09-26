@@ -122,6 +122,10 @@ def main():
               "de topology.py)...")
         subprocess.run(["mn", "-c"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+        # Devolver los ficheros creados con sudo al usuario normal, para
+        # que la fase 2 (que se ejecuta sin sudo) pueda escribir.
+        config.restore_ownership()
+
         print(f"\n*** Fin.")
         print(f"    Dataset:               {config.CSV_FILE}")
         print(f"    Log del controlador:   {config.RYU_LOG_FILE}")

@@ -16,9 +16,22 @@ aplicó una regla DROP (mitigación).
 
 Si el CSV trae la columna 'true_label' (etiqueta REAL de cada flujo,
 calculada por el controlador con el mismo criterio que el dataset), se
-generan además la matriz de confusión de la fase en vivo y una tabla de
-precision/recall por clase -directamente comparables con las de la
-validación GroupKFold de la fase 2-.
+generan además la matriz de confusión de la fase en vivo y las tablas de
+resultados.
+
+Esas tablas separan DETECCIÓN de MITIGACIÓN, que son dos preguntas
+distintas y no se pueden medir sobre lo mismo -en cuanto el controlador
+bloquea, deja de observar el tráfico que estaba midiendo-:
+
+  - defense_detection_by_class.csv: ¿acierta el modelo la etiqueta de
+    cada flujo? Precision/recall/F1 por clase, comparables con la
+    validación GroupKFold de la fase 2.
+  - defense_mitigation_by_conversation.csv: ¿bloquea lo que debe?
+    Conversaciones de ataque bloqueadas, conversaciones legítimas
+    bloqueadas por error y tiempo hasta el primer DROP.
+  - defense_recall_around_drop.csv: recall por flujo antes y después del
+    primer bloqueo, que es lo que explica la diferencia entre las dos
+    anteriores.
 
 Nota de compatibilidad: se pasan siempre numpy arrays a matplotlib
 (nunca Series de pandas), porque algunas versiones fallan al indexar
@@ -181,66 +194,64 @@ def plot_ddos(events_csv):
                           "#c0392b", "ddos_pkt_rate.png", logy=True)
 
 
-def plot_scanning(events_csv):
-    """Scanning: nº de flujos de escaneo acumulados durante la prueba.
+def _cumulative_attack_plot(events_csv, clase, color, titulo, out_name):
+    """Gráfica acumulada de una prueba de ataque, con DOS curvas:
 
-    Se usa el acumulado de flujos (no 'puertos únicos'): con el sondeo
-    cada 1s cada flujo se ve por separado con 1 puerto, así que 'puertos
-    únicos' salía siempre 1 y la gráfica era una línea plana. El nº de
-    flujos acumulados refleja mejor la actividad de escaneo (un escaneo
-    toca muchos destinos/puertos -> muchos flujos)."""
+      - flujos del ataque (etiqueta real): la actividad que hubo;
+      - detectados como ese ataque: lo que vio el modelo.
+
+    La separación entre ambas es el error de detección, y el tramo en que
+    las dos se aplanan es el ataque cortado por la mitigación. Antes una
+    gráfica dibujaba la etiqueta real y la otra la predicción, así que dos
+    figuras aparentemente equivalentes medían cosas distintas."""
     df = _load(events_csv)
-    d = _phase(df, "scanning", one_run=True)
-    # Solo los flujos que SON escaneo (etiqueta real), no el tráfico de
-    # fondo ni el warmup ARP previo. Las líneas DROP se siguen marcando
-    # sobre toda la prueba.
-    d_all = d
-    if "true_label" in d.columns:
-        d = d[d["true_label"] == "scanning"]
+    d = _phase(df, clase, one_run=True)
     fig, ax = plt.subplots(figsize=(10, 5))
     if len(d):
-        acum = np.arange(1, len(d) + 1)
-        ax.plot(d["t_rel"].to_numpy(), acum, marker=".", linestyle="-",
-                color="#e67e22", label="flujos de escaneo acumulados")
-        _mark_drops(ax, d_all)
-        ax.legend()
-    else:
-        ax.text(0.5, 0.5, "(sin datos de la prueba 'scanning')", ha="center",
-                va="center", transform=ax.transAxes, color="gray")
-    ax.set_xlabel("Tiempo (s)")
-    ax.set_ylabel("Flujos de escaneo detectados (acumulado)")
-    ax.set_title("Scanning (nmap): actividad de escaneo y momentos de mitigación"
-                 + _run_suffix(df))
-    fig.tight_layout()
-    out = os.path.join(FIGURES_DIR, "scanning_ports.png")
-    fig.savefig(out, dpi=150); plt.close(fig)
-    return out
-
-
-def plot_spoofing(events_csv):
-    """Spoofing: detecciones acumuladas durante la prueba de spoofing."""
-    df = _load(events_csv)
-    d = _phase(df, "spoofing", one_run=True)
-    fig, ax = plt.subplots(figsize=(10, 5))
-    if len(d):
-        # nº de flujos clasificados como spoofing, acumulado en el tiempo
-        is_spoof = (d["predicted_label"] == "spoofing").astype(int).to_numpy()
-        ax.plot(d["t_rel"].to_numpy(), np.cumsum(is_spoof), marker=".",
-                linestyle="-", color="#8e44ad",
-                label="detecciones de spoofing acumuladas")
+        reales = d[d["true_label"] == clase] if "true_label" in d.columns else d
+        detect = d[d["predicted_label"] == clase]
+        if len(reales):
+            ax.plot(reales["t_rel"].to_numpy(), np.arange(1, len(reales) + 1),
+                    marker=".", linestyle="-", color=color,
+                    label=f"flujos de {clase} (acumulado)")
+        if len(detect):
+            ax.plot(detect["t_rel"].to_numpy(), np.arange(1, len(detect) + 1),
+                    marker=".", linestyle="--", color="#34495e",
+                    label="detectados por el modelo (acumulado)")
         _mark_drops(ax, d)
         ax.legend()
     else:
-        ax.text(0.5, 0.5, "(sin datos de la prueba 'spoofing')",
-                ha="center", va="center", transform=ax.transAxes, color="gray")
+        ax.text(0.5, 0.5, f"(sin datos de la prueba '{clase}')", ha="center",
+                va="center", transform=ax.transAxes, color="gray")
     ax.set_xlabel("Tiempo (s)")
-    ax.set_ylabel("Flujos de spoofing detectados (acumulado)")
-    ax.set_title("Spoofing (ARP/IP): detecciones y momentos de mitigación"
-                 + _run_suffix(df))
+    ax.set_ylabel("Flujos acumulados")
+    ax.set_title(titulo + _run_suffix(df))
     fig.tight_layout()
-    out = os.path.join(FIGURES_DIR, "spoofing_detected.png")
+    out = os.path.join(FIGURES_DIR, out_name)
     fig.savefig(out, dpi=150); plt.close(fig)
     return out
+
+
+def plot_scanning(events_csv):
+    """Scanning: flujos del escaneo y detecciones acumuladas.
+
+    Se cuentan FLUJOS y no "puertos únicos": con el sondeo cada segundo,
+    cada flujo se ve por separado con un solo puerto, así que los puertos
+    únicos salían siempre 1 y la gráfica era una línea plana. El número de
+    flujos refleja mejor la actividad (un escaneo toca muchos destinos y
+    puertos, luego muchos flujos)."""
+    return _cumulative_attack_plot(
+        events_csv, "scanning", "#e67e22",
+        "Scanning (nmap y sondas ACK con hping3): actividad y mitigación",
+        "scanning_ports.png")
+
+
+def plot_spoofing(events_csv):
+    """Spoofing: flujos del ataque y detecciones acumuladas."""
+    return _cumulative_attack_plot(
+        events_csv, "spoofing", "#8e44ad",
+        "Spoofing (ARP/IP): actividad y mitigación",
+        "spoofing_detected.png")
 
 
 def plot_normal(events_csv):
@@ -301,8 +312,9 @@ def plot_confusion_live(events_csv):
     if "true_label" not in df.columns:
         return None
     from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
-    labels = [c for c in CLASSES
-              if c in set(df["true_label"]) | set(df["predicted_label"])]
+    # Orden alfabético: el MISMO que usan las matrices de confusión de la
+    # fase 2 (viene de LabelEncoder), para poder compararlas de un vistazo.
+    labels = sorted(set(CLASSES) & (set(df["true_label"]) | set(df["predicted_label"])))
     cm = confusion_matrix(df["true_label"], df["predicted_label"], labels=labels)
     fig, ax = plt.subplots(figsize=(6, 5))
     ConfusionMatrixDisplay(cm, display_labels=labels).plot(
@@ -372,18 +384,19 @@ def _prf(df, labels):
 
 
 def table_detection(events_csv):
-    """TABLA principal de resultados de la fase 3: precision / recall / F1
-    por clase y su media macro (fila macro_avg), sobre todos los flujos
-    clasificados y con el mismo criterio de etiqueta que la evaluación
-    offline de la fase 2 -por eso su F1 macro es el comparable con el de
-    la fase 2-. Si la batería se repitió, se suman todas las ejecuciones
-    (la variación entre ejecuciones está en table_battery_runs).
+    """TABLA de DETECCIÓN: precision / recall / F1 por clase y su media
+    macro (fila macro_avg), sobre todos los flujos clasificados y con el
+    mismo criterio de etiqueta que la evaluación offline de la fase 2
+    -por eso su F1 macro es el comparable con el de la fase 2-. Si la
+    batería se repitió, se suman todas las ejecuciones (la variación
+    entre ejecuciones está en table_battery_runs).
 
-    Además, por clase de ataque: tiempo hasta la primera mitigación (media
-    entre ejecuciones; desde el primer flujo del ataque visto por el
-    controlador hasta el primer DROP correcto) y nº de DROP.
-    Solo tiene sentido con la BATERÍA (las 4 clases en el mismo CSV); en
-    una prueba individual no hay con qué confundir."""
+    Mide SOLO detección: si el modelo acierta la etiqueta de cada flujo.
+    Lo relativo a la mitigación (cuándo se bloquea, qué se bloquea y a
+    qué coste) vive en table_mitigation() -antes estaba mezclado en esta
+    misma tabla-. Se separan porque son dos preguntas distintas y, sobre
+    todo, porque la mitigación ALTERA el tráfico que se está midiendo:
+    ver table_recall_around_drop() para el efecto concreto."""
     df = _load(events_csv)
     if "true_label" not in df.columns:
         return None, None
@@ -391,31 +404,153 @@ def table_detection(events_csv):
     m = _prf(df, labels)
     rows = []
     for c in labels:
-        d = df[df["true_label"] == c]
-        t_mit = ""
-        if c != "normal":
-            tiempos = []
-            for _, g in d.groupby("run"):
-                mit = g[g["mitigated"] == 1]
-                if len(mit):
-                    tiempos.append((mit["t"].min() - g["t"].min()).total_seconds())
-            if tiempos:
-                t_mit = round(float(np.mean(tiempos)), 2)
         p, r, f, n = m[c]
         rows.append({
             "class": c, "flows": n,
             "precision": round(p, 3), "recall": round(r, 3), "f1": round(f, 3),
-            "first_mitigation_s": t_mit,
-            "drops": int((d["mitigated"] == 1).sum()),
         })
     tabla = pd.DataFrame(rows)
     if len(tabla) > 1:
-        macro = {"class": "macro_avg", "flows": int(tabla["flows"].sum()),
-                 "first_mitigation_s": "", "drops": int(tabla["drops"].sum())}
+        macro = {"class": "macro_avg", "flows": int(tabla["flows"].sum())}
         for col in ["precision", "recall", "f1"]:
             macro[col] = round(tabla[col].mean(), 3)
         tabla = pd.concat([tabla, pd.DataFrame([macro])], ignore_index=True)
     out = os.path.join(TABLES_DIR, "defense_detection_by_class.csv")
+    tabla.to_csv(out, index=False)
+    return out, tabla
+
+
+def table_mitigation(events_csv):
+    """TABLA de MITIGACIÓN, medida por CONVERSACIÓN (par MAC origen -> MAC
+    destino dentro de una prueba), no por flujo.
+
+    Por qué por conversación y no por flujo: la unidad sobre la que
+    decide el controlador es la conversación -instala un DROP para el par
+    de MACs, no para un flujo suelto-. Medir la mitigación por flujo da
+    una cifra engañosa: en cuanto se instala el DROP, el ataque queda
+    cortado y los flujos que siguen apareciendo son restos sin tráfico,
+    que el modelo clasifica como normales. Eso hunde el recall POR FLUJO
+    de los ataques que mejor se mitigan (justo al revés de lo que
+    sugiere), mientras que por conversación la pregunta es la correcta:
+    de las conversaciones de ataque que hubo, ¿cuántas se llegaron a
+    bloquear, y cuántas legítimas cayeron por error?
+
+    Una conversación cuenta como "de ataque" si alguno de sus flujos
+    tiene etiqueta real de ataque, y como "bloqueada" si en algún momento
+    se le aplicó un DROP. Ojo al interpretar el recall: mide COBERTURA
+    (ninguna conversación de ataque se quedó sin bloquear en ningún
+    momento), no supresión continua -las reglas duran
+    DEFENSE_DROP_TIMEOUT segundos y, si el ataque sigue, la conversación
+    se vuelve a detectar y a bloquear-."""
+    df = _load(events_csv)
+    if "true_label" not in df.columns:
+        return None, None
+    ataque = set(CLASSES) - {"normal"}
+    conv = (df.groupby(["run", "traffic_phase", "eth_src", "eth_dst"])
+              .agg(es_ataque=("true_label", lambda s: bool(set(s) & ataque)),
+                   bloqueada=("mitigated", "max"))
+              .reset_index())
+    conv["bloqueada"] = conv["bloqueada"].astype(bool)
+
+    rows = []
+    for fase in [c for c in CLASSES if c in set(conv["traffic_phase"])]:
+        c = conv[conv["traffic_phase"] == fase]
+        d = df[df["traffic_phase"] == fase]
+        # Tiempo hasta el primer DROP, medido desde el primer flujo DEL
+        # ATAQUE visto por el controlador (no desde el inicio de la
+        # prueba: los primeros segundos aún no hay ataque que bloquear).
+        # Media entre ejecuciones. En la prueba 'normal' no aplica: no hay
+        # ataque, y todo DROP es un falso positivo.
+        tiempos = []
+        if fase != "normal":
+            for _, g in d[d["true_label"] == fase].groupby("run"):
+                mit = g[g["mitigated"] == 1]
+                if len(mit):
+                    tiempos.append((mit["t"].min() - g["t"].min()).total_seconds())
+        rows.append({
+            "traffic_phase": fase,
+            "conversations": len(c),
+            "attack_conversations": int(c["es_ataque"].sum()),
+            "attack_blocked": int((c["es_ataque"] & c["bloqueada"]).sum()),
+            "attack_not_blocked": int((c["es_ataque"] & ~c["bloqueada"]).sum()),
+            "legit_blocked": int((~c["es_ataque"] & c["bloqueada"]).sum()),
+            "drops": int((d["mitigated"] == 1).sum()),
+            "first_mitigation_s": round(float(np.mean(tiempos)), 2) if tiempos else "",
+            "runs_with_mitigation": f"{len(tiempos)}/{d['run'].nunique()}",
+        })
+    tabla = pd.DataFrame(rows)
+
+    tp = int((conv["es_ataque"] & conv["bloqueada"]).sum())
+    fp = int((~conv["es_ataque"] & conv["bloqueada"]).sum())
+    fn = int((conv["es_ataque"] & ~conv["bloqueada"]).sum())
+    prec = tp / (tp + fp) if (tp + fp) else 0.0
+    rec = tp / (tp + fn) if (tp + fn) else 0.0
+    f1 = 2 * prec * rec / (prec + rec) if (prec + rec) else 0.0
+    total = {
+        "traffic_phase": "total",
+        "conversations": len(conv),
+        "attack_conversations": tp + fn,
+        "attack_blocked": tp,
+        "attack_not_blocked": fn,
+        "legit_blocked": fp,
+        "drops": int((df["mitigated"] == 1).sum()),
+        "first_mitigation_s": "",
+        "runs_with_mitigation": "",
+    }
+    tabla = pd.concat([tabla, pd.DataFrame([total])], ignore_index=True)
+    # Precisión/recall/F1 de la DECISIÓN DE BLOQUEAR (no de clasificar);
+    # solo tienen sentido sobre el conjunto, así que van en la fila total.
+    # Se construyen como listas (y no asignando a tabla.loc[...] después)
+    # porque en pandas 3 una columna creada con "" queda de tipo cadena y
+    # rechaza que luego se le meta un número.
+    huecos = [""] * (len(tabla) - 1)
+    tabla["block_precision"] = huecos + [round(prec, 3)]
+    tabla["block_recall"] = huecos + [round(rec, 3)]
+    tabla["block_f1"] = huecos + [round(f1, 3)]
+
+    out = os.path.join(TABLES_DIR, "defense_mitigation_by_conversation.csv")
+    tabla.to_csv(out, index=False)
+    return out, tabla
+
+
+def table_recall_around_drop(events_csv):
+    """TABLA puente entre detección y mitigación: recall POR FLUJO de cada
+    ataque ANTES y DESPUÉS del primer DROP de su prueba.
+
+    Es la que explica por qué las dos formas de medir dan números tan
+    distintos. Mientras el ataque está en marcha, el modelo lo detecta
+    bien; una vez bloqueado, lo que el controlador sigue viendo son
+    flujos residuales sin tráfico, indistinguibles de tráfico normal. Sin
+    esta tabla, el recall global de un ataque que se mitiga rápido parece
+    un fallo del modelo cuando en realidad es consecuencia del éxito de
+    la mitigación."""
+    df = _load(events_csv)
+    if "true_label" not in df.columns:
+        return None, None
+    rows = []
+    for cls in [c for c in CLASSES if c != "normal" and c in set(df["true_label"])]:
+        pre_ok = pre_n = post_ok = post_n = 0
+        for _, g in df[df["traffic_phase"] == cls].groupby("run"):
+            mit = g[g["mitigated"] == 1]
+            if not len(mit):
+                continue
+            t0 = mit["t"].min()
+            d = g[g["true_label"] == cls]
+            pre, post = d[d["t"] <= t0], d[d["t"] > t0]
+            pre_n += len(pre);  pre_ok += int((pre["predicted_label"] == cls).sum())
+            post_n += len(post); post_ok += int((post["predicted_label"] == cls).sum())
+        if pre_n or post_n:
+            rows.append({
+                "class": cls,
+                "flows_before_drop": pre_n,
+                "recall_before_drop": round(pre_ok / pre_n, 3) if pre_n else "",
+                "flows_after_drop": post_n,
+                "recall_after_drop": round(post_ok / post_n, 3) if post_n else "",
+            })
+    if not rows:
+        return None, None
+    tabla = pd.DataFrame(rows)
+    out = os.path.join(TABLES_DIR, "defense_recall_around_drop.csv")
     tabla.to_csv(out, index=False)
     return out, tabla
 
@@ -460,6 +595,66 @@ def table_battery_runs(events_csv):
     return out, tabla
 
 
+def plot_offline_vs_live(events_csv):
+    """Compara, CLASE A CLASE, el rendimiento offline (fase 2, validación
+    cruzada agrupada) con el del despliegue en vivo (fase 3).
+
+    Es la figura que resume el trabajo: cuánto de lo que promete el modelo
+    en laboratorio se conserva al desplegarlo sobre tráfico nuevo y con la
+    mitigación actuando. Se dibujan recall y F1 -no la precisión, que
+    depende de la proporción de clases y en la batería no es la misma que
+    en el dataset, así que no sería comparable-.
+
+    Necesita results/tables/metrics_by_class.csv (lo genera
+    ml/evaluate.py); si no está, se omite sin fallar."""
+    ruta_offline = os.path.join(TABLES_DIR, "metrics_by_class.csv")
+    if not os.path.exists(ruta_offline):
+        return None
+    offline = pd.read_csv(ruta_offline)
+    # Modelo con mejor F1 macro = el que se despliega en la fase 3.
+    ruta_comp = os.path.join(TABLES_DIR, "metrics_comparison.csv")
+    if os.path.exists(ruta_comp):
+        comp = pd.read_csv(ruta_comp)
+        mejor = comp.sort_values("f1", ascending=False).iloc[0]["model"]
+    else:
+        mejor = offline.groupby("model")["f1"].mean().idxmax()
+    offline = offline[offline["model"] == mejor].set_index("class")
+
+    df = _load(events_csv)
+    if "true_label" not in df.columns:
+        return None
+    labels = [c for c in CLASSES if c in set(df["true_label"])
+              and c in offline.index]
+    if not labels:
+        return None
+    live = _prf(df, labels)
+
+    x = np.arange(len(labels))
+    ancho = 0.35
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5), sharey=True)
+    for ax, metrica, idx in [(axes[0], "Recall", 1), (axes[1], "F1", 2)]:
+        v_off = [offline.loc[c, metrica.lower()] for c in labels]
+        v_live = [live[c][idx] for c in labels]
+        ax.bar(x - ancho / 2, v_off, ancho, label="Offline (fase 2)",
+               color="#2980b9")
+        ax.bar(x + ancho / 2, v_live, ancho, label="En vivo (fase 3)",
+               color="#e67e22")
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, rotation=20)
+        ax.set_title(metrica)
+        ax.set_ylim(0, 1)
+        ax.grid(axis="y", alpha=0.25)
+    axes[0].set_ylabel("Puntuación")
+    axes[0].legend(loc="lower right")
+    n = df["run"].nunique()
+    fig.suptitle(f"Rendimiento por clase: validación offline ({mejor}) frente a "
+                 f"detección en vivo" + (f" ({n} ejecuciones)" if n > 1 else ""))
+    fig.tight_layout()
+    out = os.path.join(FIGURES_DIR, "offline_vs_live_by_class.png")
+    fig.savefig(out, dpi=150); plt.close(fig)
+    return out
+
+
 def generate_one(kind, events_csv=None):
     """Genera SOLO la gráfica del tipo de tráfico indicado (para las
     pruebas individuales). No genera las de otros tipos ni las tablas."""
@@ -494,9 +689,14 @@ def generate_all(events_csv=None):
     cm_out = plot_confusion_live(events_csv)
     if cm_out:
         outs.append(cm_out)
+    cmp_out = plot_offline_vs_live(events_csv)
+    if cmp_out:
+        outs.append(cmp_out)
     n_figs = len(outs)
     infra_out, infra_tab = table_infrastructure(events_csv)
     det_out, det_tab = table_detection(events_csv)
+    mit_out, mit_tab = table_mitigation(events_csv)
+    drop_out, drop_tab = table_recall_around_drop(events_csv)
     runs_out, runs_tab = table_battery_runs(events_csv)
     outs.append(infra_out)
 
@@ -508,8 +708,16 @@ def generate_all(events_csv=None):
     print(infra_tab.to_string(index=False))
     if det_out:
         outs.append(det_out)
-        print("   ", det_out)
+        print("   ", det_out, "  (DETECCIÓN: acierto del modelo por flujo)")
         print(det_tab.to_string(index=False))
+    if mit_out:
+        outs.append(mit_out)
+        print("   ", mit_out, "  (MITIGACIÓN: decisión de bloqueo por conversación)")
+        print(mit_tab.to_string(index=False))
+    if drop_out:
+        outs.append(drop_out)
+        print("   ", drop_out, "  (efecto de la mitigación sobre el recall por flujo)")
+        print(drop_tab.to_string(index=False))
     if runs_out:
         outs.append(runs_out)
         print("   ", runs_out)
