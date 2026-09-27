@@ -198,11 +198,11 @@ def plot_cost_bar(cost_df, out_path):
     hay dos órdenes de magnitud de diferencia; en lineal, las barras de
     los dos modelos rápidos serían invisibles."""
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4.5))
-    modelos = cost_df["model"]
-    ax1.bar(modelos, cost_df["training_time_s"], color="#2980b9")
+    models = cost_df["model"]
+    ax1.bar(models, cost_df["training_time_s"], color="#2980b9")
     ax1.set_ylabel("Segundos")
     ax1.set_title("Tiempo de entrenamiento (dataset completo)")
-    ax2.bar(modelos, cost_df["inference_time_ms_per_flow"], color="#e67e22")
+    ax2.bar(models, cost_df["inference_time_ms_per_flow"], color="#e67e22")
     ax2.set_yscale("log")
     ax2.set_ylabel("ms por flujo (escala log)")
     ax2.set_title("Tiempo de inferencia")

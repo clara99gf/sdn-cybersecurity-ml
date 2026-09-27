@@ -345,10 +345,10 @@ def summarize_dataset(df: pd.DataFrame, groups) -> pd.DataFrame:
     proto[df["ip_proto"] == 6] = "tcp"
     proto[df["ip_proto"] == 17] = "udp"
     g = pd.Series(groups, index=df.index)
-    filas = []
+    rows = []
     for clase in sorted(df[config.TARGET_COLUMN].unique()):
         m = df[config.TARGET_COLUMN] == clase
-        fila = {
+        row = {
             "class": clase,
             "flows": int(m.sum()),
             "share_pct": round(m.mean() * 100, 2),
@@ -359,19 +359,19 @@ def summarize_dataset(df: pd.DataFrame, groups) -> pd.DataFrame:
             "phases_with_class": int(g[m].nunique()),
         }
         for pr in ["arp", "icmp", "tcp", "udp"]:
-            fila[f"{pr}_pct"] = round((proto[m] == pr).mean() * 100, 1)
-        filas.append(fila)
-    tabla = pd.DataFrame(filas)
+            row[f"{pr}_pct"] = round((proto[m] == pr).mean() * 100, 1)
+        rows.append(row)
+    table = pd.DataFrame(rows)
     total = {"class": "total", "flows": int(len(df)), "share_pct": 100.0,
              "phases_with_class": int(pd.Series(groups).nunique())}
     for pr in ["arp", "icmp", "tcp", "udp"]:
         total[f"{pr}_pct"] = round((proto == pr).mean() * 100, 1)
-    tabla = pd.concat([tabla, pd.DataFrame([total])], ignore_index=True)
+    table = pd.concat([table, pd.DataFrame([total])], ignore_index=True)
     out = os.path.join(config.TABLES_DIR, "dataset_summary.csv")
-    tabla.to_csv(out, index=False)
+    table.to_csv(out, index=False)
     print(f"\n[preprocessing] Tabla descriptiva del dataset -> {out}")
-    print(tabla.to_string(index=False))
-    return tabla
+    print(table.to_string(index=False))
+    return table
 
 
 def main(include_window_features: bool = INCLUDE_TEMPORAL_WINDOW_FEATURES):

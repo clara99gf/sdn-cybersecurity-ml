@@ -2,24 +2,17 @@
 """
 topology.py
 -----------
-Levanta una topología en árbol en Mininet, la conecta a un controlador
-Ryu remoto (sdn_monitor.py) y lanza la generación de tráfico intercalado
-para construir el dataset.
-
-Ejecución (con el controlador Ryu ya corriendo en otra terminal):
-    sudo python3 topology.py
-
-Modo prueba manual (para depurar a mano, con la red y el controlador
-REALES -misma topología, mismos ajustes TSO/GSO/GRO- pero SIN lanzar la
-generación automática de tráfico, dejando la CLI de Mininet libre):
+Levanta la topología en árbol en Mininet, la conecta al controlador Ryu
+remoto y lanza la generación de tráfico que construye el dataset.
+ 
+No suele ejecutarse directamente: lo hace run_01_dataset.py, que además
+arranca el controlador. Para depurar a mano, con la red y el controlador
+reales pero sin generar el dataset, deja libre la CLI de Mininet:
+ 
     sudo SDN_MANUAL_TEST=1 venv/bin/python3 mininet_lab/topology.py
-
-(el orden importa: la variable va DESPUÉS de "sudo", no antes -sudo
-borra el entorno de quien lo llama por defecto, así que "VAR=1 sudo
-..." no funciona, tiene que ser "sudo VAR=1 ..."-.
-
-(normalmente no se necesita ejecutar esto directamente: se usa run_01_dataset.py
-en la raíz del proyecto, ver EJECUCION.md)
+ 
+La variable va después de "sudo": sudo descarta por defecto el entorno de
+quien lo invoca, así que "VAR=1 sudo ..." no surte efecto.
 """
 
 import os
@@ -28,10 +21,8 @@ import sys
 import time
 from functools import partial
 
-# Red de seguridad: si por lo que sea "pip install -e ." no está hecho
-# (o el venv se rehízo sin volver a ejecutarlo), esto asegura que
-# "import config" se resuelva igualmente sin depender de la instalación
-# editable ni de la carpeta desde la que se ejecute este script.
+# Permite "import config" sin depender de la instalación editable ni del
+# directorio desde el que se ejecute el script.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 
@@ -50,6 +41,8 @@ def main():
 
     topo = TreeTopo(depth=config.TOPO_DEPTH, fanout=config.TOPO_FANOUT)
     link = partial(TCLink, bw=config.LINK_BANDWIDTH_MBPS)
+    # autoSetMacs asigna MACs correlativas y predecibles, lo que permite
+    # relacionar cada host con su identidad en el dataset.
     net = Mininet(topo=topo, link=link, controller=None, autoSetMacs=True)
     net.addController(
         "c0", controller=RemoteController,
@@ -57,13 +50,15 @@ def main():
     )
     net.start()
 
+    # Sin esto las interfaces virtuales agrupan paquetes en super-tramas
+    # de hasta 64 KB, y el controlador vería tamaños y tasas que no se
+    # corresponden con el tráfico real de la red.
     info("*** Desactivando agregación de paquetes (TSO/GSO/GRO) en interfaces...\n")
     for node in net.hosts + net.switches:
         for intf_name in node.intfNames():
             if intf_name != "lo":
-                # Desactiva offloading para evitar super-tramas no realistas
                 node.cmd(f"ethtool -K {intf_name} tso off gso off gro off 2>/dev/null")
-                # Limita el tamaño de segmento al MTU estándar de Ethernet (1514B)
+                # Limita el segmento al MTU estándar de Ethernet.
                 node.cmd(f"ip link set dev {intf_name} gso_max_size 1514 2>/dev/null")
 
     info("*** Esperando a que los switches se conecten al controlador...\n")
@@ -72,21 +67,21 @@ def main():
     info("*** Comprobando conectividad básica (pingAll)...\n")
     net.pingAll()
 
+    # Identidades reales tomadas de la API de Mininet.
+    # El controlador las lee al arrancar para conocer
+    # la vinculación IP/MAC legítima desde el primer paquete.
     info("*** Escribiendo identidades reales de host (IP/MAC) para el "
          "controlador...\n")
     with open(config.HOST_IDENTITY_FILE, "w") as f:
         for host in net.hosts:
             f.write(f"{host.IP()},{host.MAC()}\n")
 
-    # try/finally: igual que ya hace run_01_dataset.py -si se interrumpe
-    # con Ctrl+C (frecuente en el modo de prueba manual, CLI incluida) o
-    # falla algo, net.stop() y "mn -c" se ejecutan de todas formas, sin
-    # dejar interfaces de red colgadas para la siguiente vez.
+    # El finally garantiza que la red se detenga y se limpie aunque se
+    # interrumpa con Ctrl+C, para no dejar interfaces colgadas.
     try:
         if os.environ.get("SDN_MANUAL_TEST"):
             info("*** SDN_MANUAL_TEST activo: entrando en la CLI de Mininet en vez "
-                 "de generar el dataset -red y controlador reales, para probar "
-                 "comandos a mano (p.ej. nmap) en el entorno de verdad-.\n")
+                 "de generar el dataset.\n")
             info("*** Prueba, por ejemplo: h1 nmap -Pn -sS -T4 <IP de h2>\n")
             CLI(net)
         else:

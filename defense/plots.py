@@ -369,10 +369,10 @@ def table_infrastructure(events_csv):
             "inference_std_ms": r(inf, lambda x: x.std(), 3),
             "mitigations": int((d["mitigated"] == 1).sum()),
         })
-    tabla = pd.DataFrame(rows)
+    table = pd.DataFrame(rows)
     out = os.path.join(TABLES_DIR, "defense_infrastructure_by_traffic.csv")
-    tabla.to_csv(out, index=False)
-    return out, tabla
+    table.to_csv(out, index=False)
+    return out, table
 
 
 def _prf(df, labels):
@@ -409,15 +409,15 @@ def table_detection(events_csv):
             "class": c, "flows": n,
             "precision": round(p, 3), "recall": round(r, 3), "f1": round(f, 3),
         })
-    tabla = pd.DataFrame(rows)
-    if len(tabla) > 1:
-        macro = {"class": "macro_avg", "flows": int(tabla["flows"].sum())}
+    table = pd.DataFrame(rows)
+    if len(table) > 1:
+        macro = {"class": "macro_avg", "flows": int(table["flows"].sum())}
         for col in ["precision", "recall", "f1"]:
-            macro[col] = round(tabla[col].mean(), 3)
-        tabla = pd.concat([tabla, pd.DataFrame([macro])], ignore_index=True)
+            macro[col] = round(table[col].mean(), 3)
+        table = pd.concat([table, pd.DataFrame([macro])], ignore_index=True)
     out = os.path.join(TABLES_DIR, "defense_detection_by_class.csv")
-    tabla.to_csv(out, index=False)
-    return out, tabla
+    table.to_csv(out, index=False)
+    return out, table
 
 
 def table_mitigation(events_csv):
@@ -461,12 +461,12 @@ def table_mitigation(events_csv):
         # prueba: los primeros segundos aún no hay ataque que bloquear).
         # Media entre ejecuciones. En la prueba 'normal' no aplica: no hay
         # ataque, y todo DROP es un falso positivo.
-        tiempos = []
+        mitigation_times = []
         if fase != "normal":
             for _, g in d[d["true_label"] == fase].groupby("run"):
                 mit = g[g["mitigated"] == 1]
                 if len(mit):
-                    tiempos.append((mit["t"].min() - g["t"].min()).total_seconds())
+                    mitigation_times.append((mit["t"].min() - g["t"].min()).total_seconds())
         rows.append({
             "traffic_phase": fase,
             "conversations": len(c),
@@ -475,10 +475,10 @@ def table_mitigation(events_csv):
             "attack_not_blocked": int((c["es_ataque"] & ~c["bloqueada"]).sum()),
             "legit_blocked": int((~c["es_ataque"] & c["bloqueada"]).sum()),
             "drops": int((d["mitigated"] == 1).sum()),
-            "first_mitigation_s": round(float(np.mean(tiempos)), 2) if tiempos else "",
-            "runs_with_mitigation": f"{len(tiempos)}/{d['run'].nunique()}",
+            "first_mitigation_s": round(float(np.mean(mitigation_times)), 2) if mitigation_times else "",
+            "runs_with_mitigation": f"{len(mitigation_times)}/{d['run'].nunique()}",
         })
-    tabla = pd.DataFrame(rows)
+    table = pd.DataFrame(rows)
 
     tp = int((conv["es_ataque"] & conv["bloqueada"]).sum())
     fp = int((~conv["es_ataque"] & conv["bloqueada"]).sum())
@@ -497,20 +497,20 @@ def table_mitigation(events_csv):
         "first_mitigation_s": "",
         "runs_with_mitigation": "",
     }
-    tabla = pd.concat([tabla, pd.DataFrame([total])], ignore_index=True)
+    table = pd.concat([table, pd.DataFrame([total])], ignore_index=True)
     # Precisión/recall/F1 de la DECISIÓN DE BLOQUEAR (no de clasificar);
     # solo tienen sentido sobre el conjunto, así que van en la fila total.
-    # Se construyen como listas (y no asignando a tabla.loc[...] después)
+    # Se construyen como listas (y no asignando a table.loc[...] después)
     # porque en pandas 3 una columna creada con "" queda de tipo cadena y
     # rechaza que luego se le meta un número.
-    huecos = [""] * (len(tabla) - 1)
-    tabla["block_precision"] = huecos + [round(prec, 3)]
-    tabla["block_recall"] = huecos + [round(rec, 3)]
-    tabla["block_f1"] = huecos + [round(f1, 3)]
+    huecos = [""] * (len(table) - 1)
+    table["block_precision"] = huecos + [round(prec, 3)]
+    table["block_recall"] = huecos + [round(rec, 3)]
+    table["block_f1"] = huecos + [round(f1, 3)]
 
     out = os.path.join(TABLES_DIR, "defense_mitigation_by_conversation.csv")
-    tabla.to_csv(out, index=False)
-    return out, tabla
+    table.to_csv(out, index=False)
+    return out, table
 
 
 def table_recall_around_drop(events_csv):
@@ -549,10 +549,10 @@ def table_recall_around_drop(events_csv):
             })
     if not rows:
         return None, None
-    tabla = pd.DataFrame(rows)
+    table = pd.DataFrame(rows)
     out = os.path.join(TABLES_DIR, "defense_recall_around_drop.csv")
-    tabla.to_csv(out, index=False)
-    return out, tabla
+    table.to_csv(out, index=False)
+    return out, table
 
 
 def table_battery_runs(events_csv):
@@ -578,21 +578,21 @@ def table_battery_runs(events_csv):
         })
     if len(rows) < 2:
         return None, None
-    tabla = pd.DataFrame(rows)
+    table = pd.DataFrame(rows)
     cols = ["precision_macro", "recall_macro", "f1_macro"]
     # Media y desviación típica (poblacional, igual que np.std en la fase
     # 2) sobre los valores SIN redondear; se redondea solo al final.
-    media = {"run": "mean", "flows": round(tabla["flows"].mean(), 1)}
-    std = {"run": "std", "flows": round(tabla["flows"].std(ddof=0), 1)}
+    media = {"run": "mean", "flows": round(table["flows"].mean(), 1)}
+    std = {"run": "std", "flows": round(table["flows"].std(ddof=0), 1)}
     for c in cols:
-        media[c] = tabla[c].mean()
-        std[c] = tabla[c].std(ddof=0)
-    tabla["flows"] = tabla["flows"].astype(object)
-    tabla = pd.concat([tabla, pd.DataFrame([media, std])], ignore_index=True)
-    tabla[cols] = tabla[cols].astype(float).round(3)
+        media[c] = table[c].mean()
+        std[c] = table[c].std(ddof=0)
+    table["flows"] = table["flows"].astype(object)
+    table = pd.concat([table, pd.DataFrame([media, std])], ignore_index=True)
+    table[cols] = table[cols].astype(float).round(3)
     out = os.path.join(TABLES_DIR, "defense_battery_runs.csv")
-    tabla.to_csv(out, index=False)
-    return out, tabla
+    table.to_csv(out, index=False)
+    return out, table
 
 
 def plot_offline_vs_live(events_csv):

@@ -2,13 +2,14 @@
 """
 config.py
 ---------
-Configuración centralizada del proyecto. Todos los módulos importan este fichero
-para no duplicar rutas ni parámetros.
+Configuración centralizada del proyecto: rutas y parámetros de las tres
+fases. Los módulos de todas ellas importan este fichero, de modo que
+cada valor está definido en un único sitio.
 """
 import os
 
-# Desactiva los paquetes instalados a nivel de usuario (~/.local)
-# para evitar que interfieran con las librerías del entorno virtual.
+# Ignora los paquetes instalados en ~/.local para que no interfieran con
+# los del entorno virtual, sobre todo al ejecutar con sudo.
 os.environ.setdefault("PYTHONNOUSERSITE", "1")
 
 # --------------------------------------------------------------- #
@@ -25,38 +26,32 @@ VENV_DIR = os.path.join(PROJECT_ROOT, "venv")
 VENV_PYTHON = os.path.join(VENV_DIR, "bin", "python3")
 VENV_RYU_MANAGER = os.path.join(VENV_DIR, "bin", "ryu-manager")
 
-# Python que se usará dentro de los hosts de Mininet para lanzar
-# arp_spoof.py. Se utiliza el intérprete del entorno virtual
-# si está disponible; en caso contrario, se utiliza el python3 del sistema.
+# Se prefiere el entorno virtual, que tiene scapy y ryu; si no existe,
+# se recurre al del sistema.
 PYTHON_BIN = VENV_PYTHON if os.path.exists(VENV_PYTHON) else "python3"
-
-# Se utiliza el ejecutable del entorno virtual
-# si está disponible; en caso contrario, se utiliza el ryu-manager del sistema.
 RYU_MANAGER_BIN = VENV_RYU_MANAGER if os.path.exists(VENV_RYU_MANAGER) else "ryu-manager"
 
 # --------------------------------------------------------------- #
-# Ficheros compartidos / logs / dataset
+# Directorios y ficheros generados
 # --------------------------------------------------------------- #
-# Directorios del proyecto para almacenar datos, logs y ficheros
-# generados durante la ejecución.
 DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 LOGS_DIR = os.path.join(PROJECT_ROOT, "logs")
 RUNTIME_DIR = os.path.join(PROJECT_ROOT, "runtime") 
 
-# Crea los directorios si no existen
 for _d in (DATA_DIR, LOGS_DIR, RUNTIME_DIR):
     os.makedirs(_d, exist_ok=True)
 
+# Coordinación entre el generador de tráfico y el controlador, que son
+# procesos independientes.
 LABEL_FILE = os.path.join(RUNTIME_DIR, "current_label.txt")
 FLUSH_REQUEST_FILE = os.path.join(RUNTIME_DIR, "flush_request.txt")
-# Parejas IP/MAC reales de cada host, escritas por topology.py justo
-# tras levantar la red (con host.IP()/host.MAC(), la propia API de
-# Mininet -no una convención adivinada-) y leídas por el controlador al
-# arrancar, para "sembrar" ip_to_mac con la verdad de referencia desde
-# el principio -en vez de tener que "aprenderla" del primer paquete que
-# llegue, lo cual falla si ese primer paquete es ya un ataque de
-# spoofing de ARP-. Formato: una línea por host, "ip,mac".
+
+# Parejas IP/MAC reales de cada host ("ip,mac" por línea), escritas por
+# topology.py y leídas por el controlador al arrancar. Dan la
+# vinculación legítima desde el principio: aprenderla del tráfico
+# fallaría si el primer paquete de un host ya fuera un ARP falsificado.
 HOST_IDENTITY_FILE = os.path.join(RUNTIME_DIR, "host_identities.csv")
+
 CSV_FILE = os.path.join(DATA_DIR, "dataset_sdn.csv")
 RYU_LOG_FILE = os.path.join(LOGS_DIR, "ryu_controller.log")
 TRAFFIC_LOG_FILE = os.path.join(LOGS_DIR, "traffic_generator.log")
@@ -67,110 +62,67 @@ TRAFFIC_LOG_FILE = os.path.join(LOGS_DIR, "traffic_generator.log")
 RYU_CONTROLLER_IP = "127.0.0.1"
 RYU_CONTROLLER_PORT = 6653
 
-# Intervalo entre solicitudes de estadísticas de flujo al switch (segundos).
-# Bajado de 2s a 1s a propósito: el sondeo periódico solo "ve" un flujo
-# si le pregunta al switch mientras ese flujo sigue instalado. Los
-# flujos CORTOS (una sonda de escaneo suelta, un paquete de spoofing)
-# viven poco, así que con sondeos cada 2s se perdían a menudo -y son
-# justo la firma que distingue cada ataque, mientras que el tráfico de
-# fondo (ARP/ICMP, más duradero) sí se capturaba siempre, diluyendo la
-# señal-. A 1s, cada flujo tiene el doble de oportunidades de ser
-# capturado. Coste: más carga en el controlador y más filas por fase.
+# Intervalo entre solicitudes de estadísticas al switch (segundos). Un
+# flujo solo se observa mientras está instalado, y los más cortos (una
+# sonda de escaneo, un paquete de spoofing) son la firma de cada ataque:
+# sondear cada segundo da más oportunidades de capturarlos.
 POLL_INTERVAL = 1
-# Tiempo de inactividad tras el cual se elimina un flujo (segundos).
-# Subido de 3s a 5s por el mismo motivo, atacando el problema desde el
-# otro lado: si el flujo sobrevive más tiempo en el switch, hay más
-# margen para que algún sondeo lo capture antes de que desaparezca.
+
+# Tiempo sin tráfico tras el cual el switch elimina un flujo, y tiempo
+# máximo de permanencia (segundos). Así un flujo corto sobrevive a
+# varios sondeos sin que los largos acumulen contadores de minutos.
 FLOW_IDLE_TIMEOUT = 5
-FLOW_HARD_TIMEOUT = 10      # Tiempo máximo de permanencia de un flujo en el switch (segundos)
+FLOW_HARD_TIMEOUT = 10      
 
 # --------------------------------------------------------------- #
 # Topología Mininet
 # --------------------------------------------------------------- #
-TOPO_DEPTH = 2              # Profundidad de la topología en árbol
-TOPO_FANOUT = 4             # Número máximo de nodos hijos por cada nodo del árbol
-
-# Ancho de banda (Mbps) de cada enlace virtual.
-LINK_BANDWIDTH_MBPS = 10
+TOPO_DEPTH = 2              # Profundidad del árbol
+TOPO_FANOUT = 4             # Hijos por nodo; con depth=2 da 5 switches y 16 hosts
+LINK_BANDWIDTH_MBPS = 10    # Ancho de banda de cada enlace virtual
 
 # --------------------------------------------------------------- #
-# Generación de tráfico
+# Fase 1: generación del dataset
+# (run_01_dataset.py, mininet_lab/, controller/sdn_monitor.py)
 # --------------------------------------------------------------- #
-# Número objetivo de filas del dataset
-# NOTA: en modo prueba (30000) para validar el efecto de POLL_INTERVAL=1
-# y las sondas ACK más largas antes de la tirada final. Con el sondeo al
-# doble de frecuencia, 30000 filas tardan ~34 min (antes ~68).
-# Número objetivo de filas del dataset.
-# 300.000 (subido desde 150.000) tras comprobar con la curva de
-# aprendizaje que MÁS FASES siguen mejorando el modelo: pasar de 230 a
-# 345 fases dio +0.035 de F1, sin señal de aplanamiento -antes de
-# corregir el etiquetado por flujo la curva sí se aplanaba, por eso
-# entonces no compensaba-. Con ~325 filas/fase de media, 300.000 filas
-# dan ~920 fases (el doble que ahora).
+# Criterio de parada de la generación. A unas 300 filas por fase, dan
+# alrededor de 900 fases-
 TARGET_ROWS = 300000
-# TARGET_ROWS = 30000  # <- tamaño para tiradas de prueba rápidas
 
-# Duración máxima de la generación (segundos). Es un techo de SEGURIDAD
-# para que no se quede corriendo indefinidamente si algo va mal, NO la
-# duración esperada -TARGET_ROWS es el criterio de parada real-.
-# Recalculado con el ritmo REAL medido en la última tirada: 150.029
-# filas en 8.771s = 17,1 filas/s. Para 300.000 filas eso son ~4,9h;
-# este techo (6,6h) deja un 35% de margen.
+# Techo de seguridad (segundos) por si no se alcanzan las TARGET_ROWS.
+# No es la duración esperada, que ronda las cuatro horas.
 TOTAL_DURATION = 23700
-# Para tiradas de prueba de 30.000 filas: ~3000s es suficiente.
-# TOTAL_DURATION = 3000
 
-# Duración mínima y máxima de cada fase de tráfico (segundos)
+# Duración de cada fase de tráfico (segundos), sorteada en este rango.
 MIN_PHASE_DURATION = 10         
 MAX_PHASE_DURATION = 25
 
-# Límite de filas que puede aportar UNA SOLA fase, comprobado ENTRE
-# acciones del generador (no puede interrumpir una acción en curso).
-# Por eso es un tope aproximado, no estricto: medido sobre el dataset
-# final, 236 de las 920 fases superan las 500 filas y la mayor llega a
-# 4.064 (un nmap o un hping3 lanzado justo antes de comprobarlo sigue
-# generando flujos hasta terminar). La mediana sí queda en 270 filas.
-# Su efecto real es acotar la contribución de las fases más productivas
-# para que GroupKFold tenga muchos grupos independientes.
+# Tope aproximado de filas por fase, para que ninguna domine el
+# conjunto. Se comprueba entre acciones, así que no interrumpe una
+# herramienta ya lanzada (nmap, hping3, iperf): 242 de las 909 fases superan las 500.
 MAX_ROWS_PER_PHASE = 500
 
-# Tiempo de espera entre fases para permitir que finalice el tráfico anterior (segundos)
+# Pausas entre fases y antes de la primera, para que los flujos de la
+# anterior expiren y no se mezclen con la siguiente.
 PHASE_SETTLE_SECONDS = 1.5
-
-# Tiempo de espera antes de iniciar la primera fase (segundos)
 STARTUP_SETTLE_SECONDS = FLOW_IDLE_TIMEOUT + 2
 
-# Si es True, al arrancar el controlador se limpia cualquier
-# data/dataset_sdn.csv previo y se empieza uno nuevo en limpio.
+# Cada ejecución empieza un CSV nuevo; el segundo decide si el anterior
+# se conserva con marca de tiempo o se descarta.
 RESET_DATASET_ON_START = True
-
-# Qué hacer con el CSV anterior al resetear: True lo archiva con
-# timestamp (dataset_sdn_20260824_153000.csv); False lo borra sin más,
-# para tener siempre un único data/dataset_sdn.csv.
 ARCHIVE_PREVIOUS_DATASET = False
 
-# Indica si las filas generadas durante la fase inicial de calentamiento
-# se almacenan. Se mantiene en True (preprocessing.py las descarta
-# igualmente al preparar el dataset, y tenerlas en el CSV crudo permite
-# revisar el arranque si algo va mal). NOTA: con POLL_INTERVAL=1s el
-# warmup genera bastantes más filas que antes (~7000 de 30000 en una
-# tirada de prueba, frente a ~1800 con POLL=2s) -no afecta al modelo,
-# pero infla el CSV crudo; si molesta, ponerlo en False-.
+# Escribe las filas del calentamiento con la etiqueta "warmup". El
+# preprocesado las descarta, pero permiten revisar el arranque.
 WRITE_WARMUP_ROWS = True
 
-# Interruptor de depuración: registra en logs/ryu_controller.log cada
-# paquete TCP visto por packet_in (con sus flags) y cualquier paquete IP
-# no reconocido como TCP/UDP -útil para investigar por qué un tipo de
-# tráfico concreto no se está capturando bien. Poner a False (por
-# defecto) salvo que se esté depurando algo así -genera mucho log si se
-# deja activo en una tirada grande-.
+# Registra cada paquete TCP con sus flags. Solo para depuración: en una
+# tirada larga genera muchísimo log.
 DEBUG_TCP_FLAGS = False
 
 # --------------------------------------------------------------- #
-# Preprocesado / entrenamiento / evaluación (ml/)
+# Fase 2: preprocesado, entrenamiento y evaluación (ml/)
 # --------------------------------------------------------------- #
-# Se añaden aquí, sin tocar nada de lo de arriba, para no arriesgar la
-# parte de generación del dataset (ya validada en muchas rondas).
 DATA_PROCESSED_DIR = os.path.join(DATA_DIR, "processed")
 MODELS_DIR = os.path.join(PROJECT_ROOT, "models")
 RESULTS_DIR = os.path.join(PROJECT_ROOT, "results")
@@ -180,182 +132,106 @@ TABLES_DIR = os.path.join(RESULTS_DIR, "tables")
 for _d in (DATA_PROCESSED_DIR, MODELS_DIR, FIGURES_DIR, TABLES_DIR):
     os.makedirs(_d, exist_ok=True)
 
+# Semilla fija para garantizar la reproducibilidad de la fase 2
+# cuando se ejecuta de nuevo bajo las mismas condiciones.
 RANDOM_STATE = 42
 TEST_SIZE = 0.2
 
-# Nº de características a conservar tras la selección por importancia
-# (Random Forest), dentro de cada fold.
-#
-# COMPROBADO (no es un número heredado): se midió con `ml/evaluate.py`
-# usando los dos valores sobre el dataset completo (293.157 filas,
-# GroupKFold de 5 particiones). Random Forest da F1 = 0.7972 con 15 y
-# 0.7975 con las 22, una diferencia de 0.0003 frente a una desviación
-# entre particiones de 0.018: el mismo resultado. Se mantiene 15 porque
-# usa un 32% menos de características por el mismo rendimiento, y con
-# una inferencia algo más barata (0.0031 vs 0.0034 ms/flujo).
-# (La regresión logística sí mejora con las 22 -0.565 a 0.592-, al ser
-# lineal aprovecha cualquier señal extra; Random Forest ya descarta por
-# su cuenta lo irrelevante. No cambia qué modelo gana.)
+# Nº de características que se conservan tras la selección por
+# importancia (Random Forest), dentro de cada partición. Se eligen 15:
+# las 7 descartadas suman un 6.1% de la importancia y su
+# ausencia no cambia el F1.
 N_FEATURES = 15
 
 # Ventana temporal (segundos) de las 4 características de "patrón entre
-# flujos" (distinct_ports_by_src, distinct_targets_by_src,
-# flows_to_target, distinct_sources_to_target).
+# flujos". Es del orden de FLOW_IDLE_TIMEOUT, así que abarca la vida
+# típica de un flujo, y queda por debajo de MIN_PHASE_DURATION, así que
+# nunca mezcla dos fases.
 #
-# Vive AQUÍ, y no en cada módulo, porque la usan dos sitios que tienen
-# que coincidir obligatoriamente: ml/preprocessing.py (modo lote, al
-# preparar el dataset) y controller/live_classifier.py (modo evento, en
-# la detección en vivo). Si no coincidieran, el modelo vería en
-# detección una característica calculada de otra forma que al entrenar.
-# Antes el 5 estaba escrito a mano en los dos ficheros.
-#
-# COMPROBADO sobre el dataset completo (887 fases, GroupKFold de 5
-# particiones, Random Forest): 5s da F1 macro 0.7258 y 2s da 0.7201.
-# La diferencia (0.006) queda muy por debajo de la desviación entre
-# particiones (0.025), así que las dos ventanas son equivalentes en la
-# práctica. Se mantiene 5s por ser del orden de FLOW_IDLE_TIMEOUT (5s)
-# y quedar muy por debajo de la duración mínima de fase (10s), de modo
-# que la ventana nunca mezcla dos fases distintas.
-#
-# (La motivación para probar 2s era que con 5s los contadores se
-# saturan: la mediana de distinct_sources_to_target es 30 y la de
-# distinct_targets_by_src es 15 en las CUATRO clases. Desaturarlos no
-# se tradujo en mejor rendimiento, pero la saturación sigue siendo un
-# dato a tener en cuenta al interpretar la importancia de esas
-# características.)
-#
-# OJO: da nombre a las columnas (distinct_ports_by_src_<W>s), así que
-# cambiarla obliga a repetir el preprocesado Y el entrenamiento -los
-# .pkl de models/ guardan los nombres antiguos-.
+# La usan ml/preprocessing.py (modo lote) y controller/live_classifier.py
+# (modo evento) y deben coincidir: si no, el modelo vería en detección
+# una característica calculada de otra forma que al entrenar.
 WINDOW_SECONDS = 5
 
 TARGET_COLUMN = "label"
 
-# Identificadores "rígidos": permiten que el modelo memorice hosts o
-# instantes concretos del laboratorio (una IP/MAC siempre jugando el
-# mismo papel, el timestamp de una ejecución concreta) en vez de
-# aprender patrones de tráfico generalizables. Se excluyen siempre.
-# Incluye también las MACs y "dpid" (identifican host/switch del
-# laboratorio, mismo problema que una IP) además de IP y timestamp.
+# Identificadores del laboratorio: permitirían memorizar qué host o qué
+# instante participó en cada ataque, en vez de aprender patrones de
+# tráfico. Se excluyen siempre de las características.
 ID_COLUMNS = [
     "timestamp",
     "ip_src", "ip_dst",
     "eth_src", "eth_dst",
     "arp_spa", "arp_tpa", "arp_sha",
     "dpid",
-    # phase_id: identificador de fase para GroupKFold. NUNCA debe entrar
-    # como característica -sería una fuga de información masiva (el
-    # modelo aprendería "la fase 37 es scanning" en vez de a reconocer
-    # tráfico)-. Se usa solo para agrupar en la validación cruzada.
+    # Solo para agrupar en la validación cruzada. Como característica
+    # sería una fuga: el modelo aprendería qué fase es cada ataque.
     "phase_id",
 ]
 
-# Constantes de configuración (no del tráfico): mismo valor en TODAS
-# las filas del dataset (vienen fijadas en config.py del generador,
-# no varían por flujo). Aportan cero información -en la práctica ya
-# quedaban fuera de las N_FEATURES seleccionadas por tener importancia
-# ~0, pero se excluyen aquí de forma explícita en vez de confiar en
-# que la selección estadística siempre las deje fuera-.
+# Mismo valor en todas las filas, porque proceden de este fichero y no
+# del tráfico. Se excluyen explícitamente, sin confiar en que la
+# selección por importancia las descarte.
 CONSTANT_COLUMNS = ["idle_timeout", "hard_timeout"]
 
-# Categóricas de baja cardinalidad -> codificación numérica
-# (LabelEncoder) en vez de tratarlas como magnitud continua.
-# tcp_flags: combinaciones concretas de bits (SYN, SYN+ACK, ACK solo,
-# etc.) son categorías cualitativamente distintas, no una escala -por
-# eso va aquí y no como número continuo, igual que ip_proto/eth_type-.
+# Columnas cuyo número es un código, no una cantidad: el protocolo 17
+# (UDP) no es "más" que el 6 (TCP), solo distinto. Se codifican con
+# LabelEncoder para que el modelo no las interprete como magnitudes.
 CATEGORICAL_COLUMNS = ["eth_type", "ip_proto", "arp_opcode", "tcp_flags"]
 
 # Columnas con NaN estructural (no aplica a ese protocolo, no es un
-# dato perdido) -> se rellenan con 0, no se elimina la fila.
+# dato perdido): se rellenan con 0, no se elimina la fila.
 STRUCTURAL_NA_COLUMNS = [
     "ip_proto", "tcp_src_port", "tcp_dst_port",
     "udp_src_port", "udp_dst_port", "arp_opcode",
-    "tcp_flags",  # "" si el flujo no es TCP (ARP/ICMP/UDP), mismo criterio
-    "ip_mac_consistent",  # "" solo si el flujo ya existía antes de
-                           # arrancar el controlador (caso raro) -no es
-                           # ideal que se rellene con 0 (mismo valor que
-                           # "inconsistente"), pero es un caso marginal
-                           # y mantiene el mismo criterio que el resto
-                           # de columnas "no aplica" del proyecto.
-    "arp_unsolicited_reply",  # "" en todo lo que no sea una respuesta
-                               # ARP (la inmensa mayoría de filas)
+    "tcp_flags",              # vacío si el flujo no es TCP
+    "ip_mac_consistent",      # vacío solo si el flujo existía antes de
+                              # arrancar el controlador, caso marginal
+    "arp_unsolicited_reply",  # vacío en todo lo que no sea respuesta ARP
 ]
 
-# Columnas de tasas: si aquí aparece un infinito o NaN real (no
-# estructural), es indeterminación aritmética -> esas filas SÍ se
-# eliminan (son pocas, y no tiene sentido imputarlas).
+# En las tasas, un infinito o un NaN es una indeterminación aritmética,
+# no un "no aplica": esas filas sí se eliminan.
 RATE_COLUMNS = ["packet_count_per_second", "byte_count_per_second", "avg_packet_size"]
-
 
 # --------------------------------------------------------------- #
 # Fase 3: detección y mitigación en vivo
-# (run_03_defense.py, controller/sdn_defense.py, defense/traffic.py)
+# (run_03_defense.py, controller/sdn_defense.py, defense/)
 # --------------------------------------------------------------- #
-# Duración de cada prueba de tráfico (segundos). 30s da tiempo a
-# capturar suficientes flujos sin alargar en exceso cada prueba.
+# Duración de cada prueba (segundos) y excepciones por tipo. Las cuatro
+# duran lo mismo para que sus resultados sean comparables.
 DEFENSE_PHASE_DURATION = 30
-# Excepciones por tipo (p.ej. {"scanning": 45}). Vacío: todas las
-# pruebas duran lo mismo. Antes el scanning duraba 45s, por si su firma
-# (muchos flujos activos acumulados) tardaba en consolidarse en vivo;
-# las pruebas reales mostraron que se detecta y mitiga en ~1s, así que
-# no hay motivo para tratarlo distinto -y con la misma duración las
-# cuatro pruebas son directamente comparables-.
 DEFENSE_PHASE_DURATION_BY_KIND = {}
 
-# DDoS con la intensidad "--flood" (sí/no). En la fase 1 se usa; aquí
-# se desactiva porque, con el modelo clasificando en vivo, el flood
-# total satura la CPU y cuelga Mininet. Las otras dos intensidades del
-# dataset (~500 y ~1000 pps) se mantienen.
+# Intensidad "--flood" del DDoS, desactivada aquí. hping3 --flood envía
+# sin límite de tasa, y Mininet ejecuta hosts, switches y controlador en
+# la misma máquina: lo que se satura es el entorno de emulación, no el
+# sistema de defensa. Las otras dos intensidades del dataset (~500 y
+# ~1000 pps) sí se usan.
 DEFENSE_DDOS_ALLOW_FLOOD = False
 
-# Duración de cada regla DROP (segundos). No permanente a propósito: la
-# red nunca queda bloqueada por reglas residuales y, si el ataque sigue,
-# se vuelve a detectar y a bloquear (como un IDS/IPS que re-evalúa).
+# Duración de cada regla DROP (segundos). Temporal a propósito: la red
+# no queda bloqueada por reglas residuales y un ataque que continúa se
+# vuelve a detectar y a bloquear.
 DEFENSE_DROP_TIMEOUT = 20
 
-# Nº de sondeos DISTINTOS en los que una conversación (MAC origen ->
-# MAC destino) debe clasificarse como ataque, dentro de
-# DEFENSE_CONFIRM_WINDOW_S segundos, antes de bloquearla. Es el mando
-# que gobierna el compromiso entre seguridad y disponibilidad: cuantas
-# más confirmaciones se exijan, menos tráfico legítimo se corta por un
-# error puntual del modelo, pero más tarde (y más raramente) se bloquea
-# un ataque real.
-#
-# MEDIDO sobre la batería de 10 ejecuciones (557 conversaciones, de las
-# que 384 eran de ataque y 128 legítimas en las pruebas de tráfico
-# normal), simulando la misma lógica con distintos valores:
-#
-#   confirmaciones | legítimas bloqueadas | ataques bloqueados | prec | recall
-#         1        |  (no medido; un solo error del modelo basta)
-#         2        |      48 de 128       |    380 de 384      | .888 | .990
-#         3        |      31 de 128       |    366 de 384      | .922 | .953
-#         4        |      16 de 128       |    358 de 384      | .957 | .932
-#
-# Se elige 3: reduce en un 35% las conversaciones legítimas cortadas
-# (cada corte deja a dos hosts sin hablarse DEFENSE_DROP_TIMEOUT
-# segundos, que es el daño real del sistema) a cambio de dejar sin
-# bloquear 14 conversaciones de ataque más de 384. Con 4 el daño baja
-# otro tanto, pero ya se escapan 26 ataques, y en un IPS perder ataques
-# pesa más que cortar de más.
+# Nº de sondeos distintos, dentro de DEFENSE_CONFIRM_WINDOW_S segundos,
+# en los que una conversación (MAC origen -> MAC destino) debe salir
+# clasificada como ataque antes de bloquearla. Exigir varias
+# confirmaciones evita que un error aislado del modelo corte tráfico
+# legítimo; un ataque real es sostenido y se confirma igualmente en
+# pocos segundos.
 DEFENSE_MITIGATION_CONFIRMATIONS = 3
 DEFENSE_CONFIRM_WINDOW_S = 5
 
 # Margen tras activar una prueba durante el que el controlador descarta
-# las estadísticas recibidas: las que ya venían en camino traen flujos
-# de ANTES de la prueba. Equivale a dos sondeos más medio segundo.
+# las estadísticas en tránsito, que describen flujos anteriores.
 DEFENSE_ACTIVATION_GRACE_S = 2 * POLL_INTERVAL + 0.5
 
-# Nº de veces que se repite la batería completa (opción 5 del menú). Cada
-# batería elige al azar atacantes, víctimas y VARIANTES de cada ataque
-# (DDoS SYN/UDP/ICMP con dos intensidades, spoofing ARP o IP...), y la
-# dificultad cambia mucho entre variantes: en dos baterías reales, el
-# F1 macro fue 0.567 (DDoS SYN + IP spoofing) y 0.740 (DDoS UDP + ARP
-# spoofing). Una sola ejecución es UNA muestra; repitiéndola se informa
-# la media y la desviación entre ejecuciones, igual que la fase 2 informa
-# la desviación entre las particiones de GroupKFold. Con 10 cada variante
-# aparece varias veces (~25 min en total); 5 sirve para pruebas (~12 min).
+# Repeticiones de la batería completa. Cada una sortea atacantes,
+# víctimas y variantes, y el resultado varía mucho entre ellas: las
+# métricas se informan como media y desviación de las 10.
 DEFENSE_BATTERY_RUNS = 10
-
 
 def restore_ownership():
     """Devuelve la propiedad de los directorios de salida al usuario que

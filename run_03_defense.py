@@ -278,8 +278,8 @@ def _cleanup(controller_proc=None, net=None):
 # Pruebas de tráfico
 # --------------------------------------------------------------------- #
 def _run_single(net, kind, duration=None, reset=True, plot=True, summary=True, run=1):
-    global _pruebas_lanzadas
-    _pruebas_lanzadas += 1
+    global _tests_run
+    _tests_run += 1
     from defense import traffic, plots
     if reset:
         _reset_all(silent=True)   # borra métricas Y gráficas/tablas anteriores
@@ -336,16 +336,16 @@ def _run_single(net, kind, duration=None, reset=True, plot=True, summary=True, r
 # para no anunciar al salir unas métricas y gráficas que, o no existen, o
 # son de una sesión anterior -si se sale sin lanzar nada, p.ej. con
 # Ctrl+C en el menú, no hay resultados nuevos que mirar-.
-_pruebas_lanzadas = 0
+_tests_run = 0
 # True si la última prueba lanzada se cortó a medias (Ctrl+C): lo que haya
 # en el CSV es un trozo de prueba, no un experimento completo, y hay que
 # avisarlo para no usarlo por error en la memoria.
-_prueba_interrumpida = False
+_test_interrupted = False
 # Ejecución de la batería en curso (nº actual, total) o None si lo que se
 # está ejecutando es una prueba suelta. Sirve para avisar con precisión si
 # se interrumpe: no es lo mismo cortar una prueba individual que cortar la
 # batería en su 7ª repetición.
-_bateria_en_curso = None
+_battery_running = None
 
 
 def _count_events():
@@ -411,15 +411,15 @@ def _print_summary():
             continue
         print(f"  {clase.upper():9s}: recall {recall:5.1f}% | {len(reales)} flujos de ataque "
               f"| {drops} DROP")
-        tiempos = []
+        mitigation_times = []
         for _, g in reales.groupby("run"):
             m = g[g["mitigated"] == 1]
             if len(m):
-                tiempos.append((m["t"].min() - g["t"].min()).total_seconds())
-        if tiempos:
-            extra = (f" (en {len(tiempos)} de {reales['run'].nunique()} ejecuciones)"
+                mitigation_times.append((m["t"].min() - g["t"].min()).total_seconds())
+        if mitigation_times:
+            extra = (f" (en {len(mitigation_times)} de {reales['run'].nunique()} ejecuciones)"
                      if n_runs > 1 else "")
-            print(f"             primera mitigación a los {sum(tiempos) / len(tiempos):.1f}s "
+            print(f"             primera mitigación a los {sum(mitigation_times) / len(mitigation_times):.1f}s "
                   f"del primer flujo del ataque{extra}")
         else:
             print("             sin mitigación del ataque")
@@ -465,9 +465,9 @@ def _run_battery(net):
     # try/except para que un fallo en una no impida las siguientes.
     _reset_all(silent=True)
     n_runs = max(1, int(getattr(config, "DEFENSE_BATTERY_RUNS", 1)))
-    global _bateria_en_curso
+    global _battery_running
     for run in range(1, n_runs + 1):
-        _bateria_en_curso = (run, n_runs)
+        _battery_running = (run, n_runs)
         print(f"\n=== BATERÍA {run}/{n_runs}: normal -> scanning -> ddos -> spoofing ===")
         for kind in ["normal", "scanning", "ddos", "spoofing"]:
             try:
@@ -476,7 +476,7 @@ def _run_battery(net):
                 print(f"*** Aviso: la prueba '{kind}' falló ({e}), continúo con la siguiente.")
                 _set_active(False)
             _drain(3)  # dejar que las últimas estadísticas se procesen
-    _bateria_en_curso = None
+    _battery_running = None
     print("\n=== Batería terminada. Generando gráficas y tablas... ===")
     _print_summary()
     # Guardar una copia del CSV completo de la batería (con las 4 clases),
@@ -563,7 +563,7 @@ MENU = f"""
 
 
 def main():
-    global _prueba_interrumpida, _bateria_en_curso
+    global _test_interrupted, _battery_running
     if os.geteuid() != 0:
         print("Este script necesita sudo (Mininet).")
         sys.exit(1)
@@ -608,12 +608,12 @@ def main():
                 # terminar toda la sesión -la red y el controlador siguen
                 # levantados, así que se puede lanzar otra prueba-. Para
                 # salir, opción 6 o Ctrl+C en el propio menú.
-                _prueba_interrumpida = True
+                _test_interrupted = True
                 _set_active(False)
                 traffic.kill_all_attack_procs(net)
                 _reset_label_file()
-                if _bateria_en_curso:
-                    run, total = _bateria_en_curso
+                if _battery_running:
+                    run, total = _battery_running
                     print(f"\n*** BATERÍA interrumpida en la ejecución {run} de "
                           f"{total}. Lo registrado queda en el CSV, pero la batería "
                           f"está A MEDIAS:")
@@ -630,7 +630,7 @@ def main():
                           "no sirven como resultado.")
                     print("    Vuelve a lanzarla (cada prueba empieza borrando lo "
                           "anterior) o sal con la opción 6.")
-                _bateria_en_curso = None
+                _battery_running = None
     except KeyboardInterrupt:
         print("\n*** Interrumpido por el usuario.")
     finally:
@@ -650,7 +650,7 @@ def main():
             f.endswith(".png") for f in os.listdir(figuras))
         hay_tablas = os.path.isdir(tablas) and any(
             f.startswith("defense_") for f in os.listdir(tablas))
-        if _pruebas_lanzadas == 0:
+        if _tests_run == 0:
             # Nada lanzado en ESTA sesión: lo que haya en results/ es de una
             # sesión anterior, así que no se anuncia como si fuera nuevo.
             print("    (no se lanzó ninguna prueba en esta sesión: no hay "
@@ -659,7 +659,7 @@ def main():
             print("    (la prueba se interrumpió antes de registrar nada: "
                   "no hay resultados)")
         else:
-            if _prueba_interrumpida:
+            if _test_interrupted:
                 print("    AVISO: la última prueba se interrumpió; estos datos "
                       "están incompletos.")
             if eventos:

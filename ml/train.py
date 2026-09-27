@@ -63,20 +63,20 @@ def save_feature_importances(importances: pd.Series, selected: list) -> None:
     se fija el modelo para distinguir cada tipo de tráfico, y permite
     discutir por qué unas clases se detectan mejor que otras. Antes solo
     se imprimía por pantalla y se perdía al cerrar la terminal."""
-    tabla = pd.DataFrame({
+    table = pd.DataFrame({
         "feature": importances.index,
         "importance": importances.round(5).values,
         "selected": [f in selected for f in importances.index],
     }).sort_values("importance", ascending=False).reset_index(drop=True)
     out_csv = os.path.join(config.TABLES_DIR, "feature_importances.csv")
-    tabla.to_csv(out_csv, index=False)
+    table.to_csv(out_csv, index=False)
 
-    top = tabla.head(config.N_FEATURES).iloc[::-1]
+    top = table.head(config.N_FEATURES).iloc[::-1]
     fig, ax = plt.subplots(figsize=(8, 0.35 * len(top) + 1.5))
     ax.barh(top["feature"], top["importance"], color="#2980b9")
     ax.set_xlabel("Importancia (Random Forest)")
     ax.set_title(f"Características más relevantes (las {config.N_FEATURES} "
-                 f"seleccionadas de {len(tabla)})")
+                 f"seleccionadas de {len(table)})")
     fig.tight_layout()
     out_png = os.path.join(config.FIGURES_DIR, "feature_importances.png")
     fig.savefig(out_png, dpi=150)
