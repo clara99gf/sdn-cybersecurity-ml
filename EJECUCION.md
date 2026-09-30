@@ -26,8 +26,7 @@ topología, genera fases de tráfico aleatorias hasta alcanzar
 arranca, muestra en la terminal las últimas líneas de su log.
 
 Genera `data/dataset_sdn.csv`. El tamaño y la duración se ajustan en
-`config.py` (`TARGET_ROWS`, `TOTAL_DURATION`); hay valores comentados
-para tiradas de prueba cortas.
+`config.py` (`TARGET_ROWS`, `TOTAL_DURATION`).
 
 **Prueba manual** (red y controlador reales, sin generar el dataset),
 útil para lanzar comandos a mano desde la CLI de Mininet:
@@ -38,9 +37,6 @@ sudo venv/bin/ryu-manager controller/sdn_monitor.py
 # Terminal 2 (la variable va DESPUÉS de sudo)
 sudo SDN_MANUAL_TEST=1 venv/bin/python3 mininet_lab/topology.py
 ```
-
-Si no existe `venv/bin/ryu-manager` (depende de cómo se instalara Ryu),
-usa `sudo ryu-manager ...`.
 
 ## Fase 2: preprocesado, entrenamiento y evaluación
 
@@ -86,7 +82,7 @@ la comprobación real, que debe salir con 0 % de pérdida.
 | 5 | Batería completa: los cuatro tipos seguidos, repetidos `DEFENSE_BATTERY_RUNS` veces (10 por defecto, unos 25 minutos). Resumen global, todas las gráficas y las tablas |
 | 6 | Salir limpiando el entorno |
 
-Cada opción borra los resultados anteriores de la fase 3. La duración de
+Cada nueva prueba borra los resultados anteriores de la fase 3. La duración de
 las pruebas y los parámetros de la mitigación están en la sección
 "Fase 3" de `config.py`.
 
@@ -100,7 +96,7 @@ las pruebas y los parámetros de la mitigación están en la sección
 | `defense_events_battery.csv` | Copia de la última batería completa. Idéntico al anterior justo después de lanzar la opción 5; se diferencia en cuanto se lanza una prueba individual, que sobrescribe `defense_events.csv` pero no esta copia |
 
 **Tablas** (`results/tables/`). Las dos primeras responden preguntas
-distintas y no deben confundirse: la detección mide si el modelo acierta
+distintas: la detección mide si el modelo acierta
 la etiqueta de cada flujo; la mitigación, si el controlador bloquea lo
 que debe. Se separan porque el bloqueo altera el tráfico que se está
 midiendo.
@@ -118,16 +114,11 @@ midiendo.
 | Fichero | Qué contiene |
 |---|---|
 | `confusion_matrix_live.png` | Matriz de confusión de la detección en vivo, con todas las ejecuciones |
-| `offline_vs_live_by_class.png` | Recall y F1 por clase, offline frente a en vivo (necesita la fase 2 ejecutada) |
+| `offline_vs_live_by_class.png` | Recall y F1 por clase, offline frente a en vivo |
 | `scanning_ports.png`, `spoofing_detected.png` | Flujos reales del ataque frente a los detectados por el modelo, acumulados, con los instantes de bloqueo |
 | `ddos_pkt_rate.png` | Tasa de paquetes del DDoS: se ve el ataque cortado tras el DROP y su reaparición al expirar la regla |
 | `normal_pkt_rate.png` | Tasa de paquetes del tráfico legítimo con los bloqueos erróneos marcados |
 | `cpu_vs_latency.png` | CPU de Ryu y latencia del plano de control durante cada tipo de prueba |
-
-Las gráficas por tipo de tráfico y la de CPU corresponden a la ejecución
-representativa de la batería (aquella cuyo F1 macro está más cerca de la
-media); la matriz de confusión y la comparativa offline/en vivo usan
-todas las ejecuciones.
 
 Para regenerar gráficas y tablas desde un CSV ya recogido, sin volver a
 lanzar la red:
@@ -149,18 +140,9 @@ venv/bin/python3 defense/plots.py results/events/defense_events_battery.csv
 | Logs del tráfico | `logs/traffic_generator.log` (fase 1), `logs/defense_traffic.log` (fase 3) |
 | Ficheros de coordinación | `runtime/` |
 
-Todo se guarda dentro del proyecto (no en `/tmp`) para que sea visible
-con el usuario normal aunque se ejecute con `sudo`. Al terminar, las
-fases 1 y 3 devuelven la propiedad de esos directorios al usuario que
-lanzó `sudo`, para que la fase 2 (que va sin `sudo`) pueda escribir en
-ellos. Las rutas se configuran en `config.py`.
-
 ## Si algo se queda colgado
 
 ```bash
 sudo mn -c
 sudo pkill -f ryu-manager
 ```
-
-Si una clase de tráfico no aparece, revisa primero el log de tráfico de
-la fase correspondiente: ahí quedan los comandos lanzados y sus errores.

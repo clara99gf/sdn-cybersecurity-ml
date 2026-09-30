@@ -1,26 +1,17 @@
 """
-live_classifier.py
-------------------
-Clasificador de flujos EN VIVO para la fase de detección y mitigación.
-
-Reproduce EXACTAMENTE el mismo preprocesado que ml/preprocessing.py
-(mismas columnas, mismo orden, mismos LabelEncoders, mismo StandardScaler
-y misma selección de características), pero aplicado flujo a flujo en
-tiempo real en vez de en lote sobre un CSV. Así, un flujo se clasifica
-en detección igual que se habría clasificado durante el entrenamiento.
-
-Las 4 características de ventana temporal se calculan con el MISMO módulo
-compartido (feature_windows.WindowTracker) que usa el preprocesado; aquí
-los WindowTracker se alimentan en cada sondeo del controlador, no en
-lote. Esto garantiza que la feature "distinct_ports_by_src" (etc.)
-signifique lo mismo en entrenamiento y en detección.
-
-Carga los artefactos que guarda ml/train.py:
-    - <model>.pkl        (best_model.pkl por defecto)
-    - scaler.pkl
-    - selected_features.pkl
-    - encoders.pkl       (LabelEncoders de las categóricas)
-    - le_y.pkl           (LabelEncoder de la etiqueta -> nombres de clase)
+controller/live_classifier.py
+-----------------------------
+Clasificador de flujos en vivo de la fase 3. Reproduce el mismo
+preprocesado que ml/preprocessing.py (mismas columnas y orden, mismos
+encoders, mismo scaler, misma selección de características), pero flujo a
+flujo en tiempo real en vez de en lote sobre el CSV, de modo que un flujo
+se clasifica igual que se habría clasificado al entrenar.
+ 
+Las 4 características de ventana temporal se calculan con el mismo módulo
+compartido (feature_windows.WindowTracker) que el preprocesado, aquí
+alimentado en cada sondeo. Carga los artefactos de ml/train.py:
+best_model.pkl, scaler.pkl, selected_features.pkl, encoders.pkl y
+le_y.pkl.
 """
 import os
 import time
@@ -29,20 +20,18 @@ import warnings
 import numpy as np
 import pandas as pd
 
-# sklearn avisa en cada predicción de que el array no tiene nombres de
-# columna (los tenía al entrenar). Es inofensivo -las columnas van en el
-# orden correcto-, pero se repetiría en CADA flujo y saturaría el log del
-# controlador, ralentizándolo. Lo silenciamos.
+# sklearn avisa en cada predicción de que el array no lleva nombres de
+# columna. Es inofensivo (van en el orden correcto), pero repetido en
+# cada flujo saturaría el log del controlador. Se silencia.
 warnings.filterwarnings(
     "ignore",
     message="X does not have valid feature names",
     category=UserWarning,
 )
 
-# Robustez de importación: si este módulo se carga desde el controlador
-# lanzado por ryu-manager, la raíz del proyecto podría no estar en el
-# path todavía. La añadimos para que 'config', 'feature_windows' y
-# 'ml.utils' se resuelvan igual que en el resto del proyecto.
+# Añade la raíz del proyecto al path: al cargarse desde ryu-manager
+# podría no estar, y 'config', 'feature_windows' y 'ml.utils' deben
+# resolverse igual que en el resto del proyecto.
 import sys
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
@@ -52,11 +41,9 @@ import config
 from feature_windows import WindowTracker
 from ml.utils import load_artifact
 
-# Ventana temporal de las 4 características de patrón entre flujos.
-# Se lee de config.py, igual que hace ml/preprocessing.py: los dos
-# TIENEN que usar el mismo valor, porque da nombre a las columnas y
-# define el cálculo. Escrito a mano en los dos sitios era cuestión de
-# tiempo que se desincronizaran.
+# Ventana temporal de las características de patrón entre flujos. Se lee de
+# config.py, que el preprocesado usa también: deben coincidir, porque da
+# nombre a las columnas y define el cálculo.
 _W = config.WINDOW_SECONDS
 
 # Orden EXACTO de columnas tal y como las ve el modelo tras el
@@ -80,32 +67,24 @@ FILL = 0
 class LiveClassifier:
     def __init__(self, model_name="best_model.pkl", window_s=None):
         self.window_s = window_s if window_s is not None else _W
-        # best_model.pkl lo crea ml/evaluate.py (el mejor de los 3). Si
-        # aún no se ha ejecutado la evaluación, se recurre a
-        # random_forest.pkl, que es el que suele ganar.
+        # best_model.pkl lo crea ml/evaluate.py; si aún no se ha evaluado,
+        # se recurre a random_forest.pkl.
         try:
             self.model = load_artifact(model_name)
         except FileNotFoundError:
             self.model = load_artifact("random_forest.pkl")
-        # CRÍTICO: forzar n_jobs=1 en el modelo. El Random Forest se
-        # entrenó con n_jobs=-1 (todos los núcleos, vía joblib), y ese
-        # valor queda GUARDADO dentro del .pkl. Al hacer predict() dentro
-        # del controlador Ryu -que usa eventlet con monkey-patching de
-        # threading/multiprocessing-, joblib intenta crear workers
-        # paralelos que entran en DEADLOCK con eventlet: el predict() se
-        # queda colgado para siempre (se veía "MODEL START" sin "MODEL
-        # END"), bloqueando el único hilo del controlador. Con n_jobs=1
-        # no hay paralelismo de joblib y no hay deadlock. Se fuerza aquí,
-        # al cargar, para que funcione SIN tener que reentrenar el modelo.
+        # Forzar n_jobs=1. El modelo se entrenó con n_jobs=-1 y ese valor
+        # queda guardado en el .pkl, pero dentro del controlador Ryu
+        # (eventlet con monkey-patching de threading) los workers paralelos
+        # de joblib entran en deadlock y predict() se cuelga. Con n_jobs=1
+        # no hay paralelismo ni deadlock, sin necesidad de reentrenar.
         try:
             self.model.n_jobs = 1
         except Exception:
             pass
-        # Confirmación visible en el log del controlador.
         try:
             print(f"[live_classifier] modelo cargado ({type(self.model).__name__}), "
-                  f"n_jobs={getattr(self.model, 'n_jobs', '?')} "
-                  f"(forzado a 1 para evitar deadlock joblib/eventlet)", flush=True)
+                  f"n_jobs={getattr(self.model, 'n_jobs', '?')}", flush=True)
         except Exception:
             pass
         self.scaler = load_artifact("scaler.pkl")
@@ -139,21 +118,15 @@ class LiveClassifier:
 
     # -- codificación de categóricas igual que en el preprocesado -------
     def _encode_categorical(self, col, value):
-        """Aplica la MISMA codificación que el LabelEncoder del
-        preprocesado.
-
-        Ojo con el detalle (era un bug grave): en el CSV del dataset,
-        ip_proto / arp_opcode / tcp_flags tienen huecos (NaN), así que
-        pandas los lee como float y el LabelEncoder aprendió las clases
-        como texto "6.0", "1.0", "2.0"... En vivo llegan como enteros, y
-        str(6) = "6" no coincidía con "6.0": TODA categoría acababa
-        codificada como la clase 0 (el modelo veía todos los flujos IP
-        "sin protocolo", todos los ARP con el mismo opcode y tcp_flags
-        siempre a 0). Comparando por valor numérico no hay ambigüedad.
-
-        Huecos (None/"") -> 0.0, igual que el fillna(0) del preprocesado.
-        Una categoría nunca vista en entrenamiento se trata también como
-        0.0 ("no aplica") en vez de fallar."""
+        """Aplica la misma codificación que el LabelEncoder del preprocesado,
+        comparando por valor numérico.
+ 
+        Es imprescindible comparar por número, no por texto: en el CSV las
+        categóricas tienen huecos, así que pandas las leyó como float y el
+        encoder aprendió las clases como "6.0", "1.0"... En vivo llegan
+        como enteros, y str(6)="6" no casaría con "6.0", codificándolo todo
+        como la clase 0. Los huecos y las categorías nunca vistas se tratan
+        como 0.0 ("no aplica"), igual que el fillna(0) del preprocesado."""
         m = self._cat_maps.get(col)
         if m is None:
             return _num(value)
@@ -188,11 +161,11 @@ class LiveClassifier:
         """
         now = now if now is not None else time.time()
 
-        # Identificadores para las ventanas, con el MISMO criterio que
-        # preprocessing.py: origen = ip_src y, si no hay (ARP), la MAC
-        # origen (eth_src) -NO arp_spa: antes se usaba la IP ARP y las
-        # 4 features de ventana de todo el ARP se calculaban con claves
-        # distintas a las del entrenamiento-. Destino = ip_dst o arp_tpa.
+        # Identificadores de las ventanas, con el mismo criterio que
+        # preprocessing.py: origen = ip_src o, si es ARP, la MAC origen
+        # (eth_src, no arp_spa); destino = ip_dst o arp_tpa. Deben coincidir
+        # con el entrenamiento o las 4 características se calcularían sobre
+        # claves distintas.
         src_id = raw.get("ip_src") or raw.get("eth_src") or "?"
         dst_id = raw.get("ip_dst") or raw.get("arp_tpa") or "?"
         dst_port = raw.get("tcp_dst_port")
@@ -256,21 +229,16 @@ class LiveClassifier:
         return label, infer_ms, dict(self._last_window)
 
     def predict_batch(self, raws, now=None):
-        """Clasifica VARIOS flujos en UNA sola llamada al modelo.
-
-        Es la diferencia entre que el controlador funcione o se atasque:
-        llamar a model.predict() por cada flujo cuesta ~30ms CADA UNO
-        (150 flujos x 5 switches = 22s de trabajo por cada segundo de
-        sondeo -> el controlador se queda minutos atrás y deja de
-        responder). Con una sola llamada sobre la matriz completa,
-        scikit-learn clasifica los 150 en unos pocos milisegundos.
-
-        Las features de ventana se calculan igual, flujo a flujo y en
-        orden (los WindowTracker necesitan secuencia), que es barato; lo
-        caro era la inferencia repetida.
-
-        Devuelve una lista de (label, infer_ms_por_flujo, window_feats),
-        en el mismo orden que 'raws'.
+        """Clasifica varios flujos en una sola llamada al modelo.
+ 
+        Es lo que evita que el controlador se atasque: llamar a predict()
+        por flujo tiene un coste fijo por llamada que, multiplicado por
+        todos los flujos de cada sondeo, deja al controlador atrás. Una
+        sola llamada sobre la matriz completa los clasifica en unos pocos
+        milisegundos. Las características de ventana sí se calculan flujo a
+        flujo y en orden (el WindowTracker necesita secuencia), pero eso es
+        barato. Devuelve (label, infer_ms_por_flujo, window_feats) por
+        flujo, en el orden de 'raws'.
         """
         if not raws:
             return []

@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """
 run_01_dataset.py
-----------
-Lanza TODO el proceso de generación del dataset con un único comando:
-  1) Localiza y arranca el controlador Ryu (controller/sdn_monitor.py)
-     en segundo plano.
-  2) Espera a que esté escuchando en RYU_CONTROLLER_PORT.
-  3) Levanta la topología Mininet y genera el tráfico.
-  4) Al terminar (o si se interrumpe con Ctrl+C), detiene el controlador
-     y limpia el estado residual de Mininet (mn -c).
-
-Ejecución:
-    sudo venv/bin/python3 run_01_dataset.py (Ver EJECUCION.md).
+-----------------
+Orquestador de la fase 1: genera el dataset con un solo comando.
+ 
+Arranca el controlador Ryu (controller/sdn_monitor.py) en segundo plano,
+espera a que escuche, levanta la topología Mininet y lanza la generación
+de tráfico. Al terminar, o si se interrumpe con Ctrl+C, detiene el
+controlador, limpia el estado de Mininet y devuelve al usuario la
+propiedad de los ficheros creados con sudo.
+ 
+    sudo venv/bin/python3 run_01_dataset.py    (ver EJECUCION.md)
 """
 import os
 import shutil
@@ -22,19 +21,14 @@ import time
 
 import config
 
-# IMPRESCINDIBLE, no una redundancia: sin esto, "import topology" (más
-# abajo) falla con ModuleNotFoundError. pip install -e . no lo sustituye:
-# setup.py registra mininet_lab como paquete con prefijo
-# (mininet_lab.topology), no como "topology" a secas.
+# Necesario para "import topology" (más abajo): setup.py registra el
+# paquete como mininet_lab.topology, no como "topology" a secas.
 sys.path.insert(0, config.MININET_LAB_DIR)
 
 
 def wait_for_port(host, port, timeout=30):
-    """
-    Realiza sondeos periódicos mediante sockets TCP para comprobar si un puerto está abierto.
-
-    Retorna True tan pronto como se acepta la conexión, o False si se agota el timeout.
-    """
+    """Sondea el puerto con conexiones TCP hasta que acepta (True) o se
+    agota el timeout (False). Sirve para esperar a que Ryu esté listo."""
     start = time.time()
     while time.time() - start < timeout:
         try:
@@ -46,10 +40,8 @@ def wait_for_port(host, port, timeout=30):
 
 
 def resolve_ryu_manager():
-    """
-    Localiza el ejecutable 'ryu-manager'.
-    Prioriza el entorno virtual (venv) del proyecto y, si no lo encuentra, busca en el PATH global.
-    """
+    """Devuelve la ruta de 'ryu-manager', priorizando el del venv y
+    recurriendo al del PATH si no está."""
     if os.path.exists(config.VENV_RYU_MANAGER):
         return config.VENV_RYU_MANAGER
     return shutil.which("ryu-manager")
@@ -67,6 +59,8 @@ def print_log_tail(path, n=25):
 
 
 def main():
+    """Arranca el controlador, lanza la topología y limpia todo al
+    terminar. Requiere sudo (Mininet lo necesita)."""
     if os.geteuid() != 0:
         print("Este script debe ejecutarse con sudo (Mininet lo requiere). "
               "Consulta EJECUCION.md.")
@@ -76,13 +70,9 @@ def main():
     if ryu_bin is None:
         print(f"No se encontró 'ryu-manager' ni en el venv "
               f"({config.VENV_RYU_MANAGER}) ni en el PATH.\n"
-              "Prueba:\n"
-              "  ./venv/bin/pip install ryu\n"
-              "y comprueba que aparece ./venv/bin/ryu-manager. Si tu versión "
-              "de Python es muy reciente (3.11+), 'ryu' (poco mantenido) "
-              "puede fallar al instalar por incompatibilidad con eventlet; "
-              "la alternativa es usar un venv con Python 3.8/3.9, o el fork "
-              "mantenido 'os-ken' (misma API).")
+              "Ejecuta ./setup.sh, que instala Ryu en el venv y aplica el "
+              "parche que necesita para arrancar. Ryu solo es compatible con "
+              "Python 3.8-3.10.")
         sys.exit(1)
 
     print(f"*** Arrancando el controlador Ryu ({ryu_bin})...")
@@ -117,13 +107,12 @@ def main():
             ryu_proc.kill()
         log_fp.close()
 
-        print("*** [run_01_dataset.py] Limpiando estado residual de Mininet "
-              "(mn -c, red de seguridad extra por si algo se saltó la limpieza "
-              "de topology.py)...")
+        print("*** Limpiando estado residual de Mininet (mn -c, por si algo "
+              "se saltó la limpieza de topology.py)...")
         subprocess.run(["mn", "-c"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        # Devolver los ficheros creados con sudo al usuario normal, para
-        # que la fase 2 (que se ejecuta sin sudo) pueda escribir.
+        # Devuelve al usuario los ficheros creados con sudo, para que la
+        # fase 2 (sin sudo) pueda escribir en ellos.
         config.restore_ownership()
 
         print(f"\n*** Fin.")

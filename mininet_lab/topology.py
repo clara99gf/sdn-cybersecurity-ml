@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-topology.py
------------
+mininet_lab/topology.py
+-----------------------
 Levanta la topología en árbol en Mininet, la conecta al controlador Ryu
 remoto y lanza la generación de tráfico que construye el dataset.
  

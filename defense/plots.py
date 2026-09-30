@@ -4,25 +4,25 @@ defense/plots.py
 Genera las gráficas y tablas de la fase de detección y mitigación a
 partir del CSV de eventos que escribe controller/sdn_defense.py
 (results/events/defense_events.csv).
-
+ 
 Cada gráfica de tráfico usa la columna 'traffic_phase' (qué prueba
 estaba en marcha), NO 'predicted_label' -así la gráfica de "scanning"
 muestra TODO lo ocurrido durante la prueba de scanning (incluidos los
 flujos que el modelo no acertó), que es lo que interesa para ver el
 comportamiento de la red durante ese ataque-.
-
+ 
 Todas las gráficas marcan con una línea vertical los instantes en que se
 aplicó una regla DROP (mitigación).
-
+ 
 Si el CSV trae la columna 'true_label' (etiqueta REAL de cada flujo,
 calculada por el controlador con el mismo criterio que el dataset), se
 generan además la matriz de confusión de la fase en vivo y las tablas de
 resultados.
-
+ 
 Esas tablas separan DETECCIÓN de MITIGACIÓN, que son dos preguntas
 distintas y no se pueden medir sobre lo mismo -en cuanto el controlador
 bloquea, deja de observar el tráfico que estaba midiendo-:
-
+ 
   - defense_detection_by_class.csv: ¿acierta el modelo la etiqueta de
     cada flujo? Precision/recall/F1 por clase, comparables con la
     validación GroupKFold de la fase 2.
@@ -32,7 +32,7 @@ bloquea, deja de observar el tráfico que estaba midiendo-:
   - defense_recall_around_drop.csv: recall por flujo antes y después del
     primer bloqueo, que es lo que explica la diferencia entre las dos
     anteriores.
-
+ 
 Nota de compatibilidad: se pasan siempre numpy arrays a matplotlib
 (nunca Series de pandas), porque algunas versiones fallan al indexar
 una Series dentro de ax.plot().
@@ -82,8 +82,7 @@ def representative_run(df):
     más cerca de la media de todas. Las gráficas temporales muestran una
     sola ejecución (promediar curvas de ejecuciones distintas no tiene
     sentido: cada una tiene su ritmo, sus instantes de DROP y su nº de
-    flujos), y conviene que sea un caso típico y no el mejor ni el peor
-    -que es lo que pasaba antes usando simplemente la última-.
+    flujos), y conviene que sea un caso típico, no el mejor ni el peor.
     Si no se puede calcular (una sola ejecución, o ejecuciones
     incompletas), devuelve la última."""
     runs = sorted(df["run"].unique())
@@ -110,7 +109,7 @@ def _phase(df, phase, one_run=False):
     (t_rel) medido desde el INICIO DE ESA PRUEBA. Así, en la batería,
     cada gráfica empieza en 0 s en vez de en el segundo de la batería en
     que arrancó esa prueba.
-
+ 
     one_run=True: solo la ejecución representativa de la batería (ver
     representative_run). Lo usan las gráficas temporales; las tablas y la
     matriz de confusión usan todas las ejecuciones."""
@@ -182,7 +181,7 @@ def _timeline_plot(df, phase, ycol, ylabel, title, color, out_name, logy=False):
 
 def plot_ddos(events_csv):
     """DDoS: tasa de paquetes/s durante la prueba de ddos.
-
+ 
     Eje Y en escala logarítmica: la tasa de un flujo recién instalado se
     estima como paquetes / edad del flujo (mismo cálculo que el monitor
     del dataset), y con edades de milisegundos salen picos de cientos de
@@ -196,14 +195,12 @@ def plot_ddos(events_csv):
 
 def _cumulative_attack_plot(events_csv, clase, color, titulo, out_name):
     """Gráfica acumulada de una prueba de ataque, con DOS curvas:
-
+ 
       - flujos del ataque (etiqueta real): la actividad que hubo;
       - detectados como ese ataque: lo que vio el modelo.
-
+ 
     La separación entre ambas es el error de detección, y el tramo en que
-    las dos se aplanan es el ataque cortado por la mitigación. Antes una
-    gráfica dibujaba la etiqueta real y la otra la predicción, así que dos
-    figuras aparentemente equivalentes medían cosas distintas."""
+    las dos se aplanan es el ataque cortado por la mitigación."""
     df = _load(events_csv)
     d = _phase(df, clase, one_run=True)
     fig, ax = plt.subplots(figsize=(10, 5))
@@ -234,12 +231,11 @@ def _cumulative_attack_plot(events_csv, clase, color, titulo, out_name):
 
 def plot_scanning(events_csv):
     """Scanning: flujos del escaneo y detecciones acumuladas.
-
-    Se cuentan FLUJOS y no "puertos únicos": con el sondeo cada segundo,
-    cada flujo se ve por separado con un solo puerto, así que los puertos
-    únicos salían siempre 1 y la gráfica era una línea plana. El número de
-    flujos refleja mejor la actividad (un escaneo toca muchos destinos y
-    puertos, luego muchos flujos)."""
+ 
+    Se cuentan flujos, no puertos únicos: con un sondeo por segundo cada
+    flujo se ve con un solo puerto, así que el número de flujos refleja
+    mejor la actividad del escaneo (muchos destinos y puertos) que un
+    recuento de puertos distintos."""
     return _cumulative_attack_plot(
         events_csv, "scanning", "#e67e22",
         "Scanning (nmap y sondas ACK con hping3): actividad y mitigación",
@@ -329,9 +325,7 @@ def plot_confusion_live(events_csv):
 
 
 def table_infrastructure(events_csv):
-    """TABLA del impacto en infraestructura POR TIPO DE TRÁFICO, en tabla
-    y no en gráfica porque así se leen los valores exactos por clase, que
-    en una nube de puntos no se distinguen:
+    """TABLA del impacto en infraestructura POR TIPO DE TRÁFICO:
 
       - CPU media y máxima del proceso Ryu.
       - Latencia del plano de control: del evento OFPFlowStatsReply al
@@ -341,10 +335,7 @@ def table_infrastructure(events_csv):
         una vez todos los flujos de un sondeo, así que el coste fijo de
         cada llamada al modelo se reparte entre los flujos del lote.
       - Nº de mitigaciones aplicadas.
-
-    Antes esto estaba repartido en dos tablas (CPU/latencia e inferencia)
-    que repetían la columna de inferencia media; es la misma medida sobre
-    los mismos eventos, así que va en una sola."""
+    """
     df = _load(events_csv)
     rows = []
     for phase in CLASSES:
@@ -390,13 +381,12 @@ def table_detection(events_csv):
     -por eso su F1 macro es el comparable con el de la fase 2-. Si la
     batería se repitió, se suman todas las ejecuciones (la variación
     entre ejecuciones está en table_battery_runs).
-
+ 
     Mide SOLO detección: si el modelo acierta la etiqueta de cada flujo.
-    Lo relativo a la mitigación (cuándo se bloquea, qué se bloquea y a
-    qué coste) vive en table_mitigation() -antes estaba mezclado en esta
-    misma tabla-. Se separan porque son dos preguntas distintas y, sobre
-    todo, porque la mitigación ALTERA el tráfico que se está midiendo:
-    ver table_recall_around_drop() para el efecto concreto."""
+    Lo relativo a la mitigación (cuándo y qué se bloquea) vive en
+    table_mitigation(). Se separan porque son preguntas distintas y porque
+    la mitigación altera el tráfico que se mide (ver
+    table_recall_around_drop())."""
     df = _load(events_csv)
     if "true_label" not in df.columns:
         return None, None
@@ -423,21 +413,20 @@ def table_detection(events_csv):
 def table_mitigation(events_csv):
     """TABLA de MITIGACIÓN, medida por CONVERSACIÓN (par MAC origen -> MAC
     destino dentro de una prueba), no por flujo.
-
+ 
     Por qué por conversación y no por flujo: la unidad sobre la que
     decide el controlador es la conversación -instala un DROP para el par
     de MACs, no para un flujo suelto-. Medir la mitigación por flujo da
     una cifra engañosa: en cuanto se instala el DROP, el ataque queda
     cortado y los flujos que siguen apareciendo son restos sin tráfico,
     que el modelo clasifica como normales. Eso hunde el recall POR FLUJO
-    de los ataques que mejor se mitigan (justo al revés de lo que
-    sugiere), mientras que por conversación la pregunta es la correcta:
+    de los ataques que mejor se mitigan, mientras que por conversación la pregunta es la correcta:
     de las conversaciones de ataque que hubo, ¿cuántas se llegaron a
     bloquear, y cuántas legítimas cayeron por error?
-
+ 
     Una conversación cuenta como "de ataque" si alguno de sus flujos
     tiene etiqueta real de ataque, y como "bloqueada" si en algún momento
-    se le aplicó un DROP. Ojo al interpretar el recall: mide COBERTURA
+    se le aplicó un DROP. El recall: mide COBERTURA
     (ninguna conversación de ataque se quedó sin bloquear en ningún
     momento), no supresión continua -las reglas duran
     DEFENSE_DROP_TIMEOUT segundos y, si el ataque sigue, la conversación
@@ -598,13 +587,13 @@ def table_battery_runs(events_csv):
 def plot_offline_vs_live(events_csv):
     """Compara, CLASE A CLASE, el rendimiento offline (fase 2, validación
     cruzada agrupada) con el del despliegue en vivo (fase 3).
-
+ 
     Es la figura que resume el trabajo: cuánto de lo que promete el modelo
     en laboratorio se conserva al desplegarlo sobre tráfico nuevo y con la
     mitigación actuando. Se dibujan recall y F1 -no la precisión, que
     depende de la proporción de clases y en la batería no es la misma que
     en el dataset, así que no sería comparable-.
-
+ 
     Necesita results/tables/metrics_by_class.csv (lo genera
     ml/evaluate.py); si no está, se omite sin fallar."""
     ruta_offline = os.path.join(TABLES_DIR, "metrics_by_class.csv")

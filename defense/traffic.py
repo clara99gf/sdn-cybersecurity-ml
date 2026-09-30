@@ -1,31 +1,19 @@
 """
 defense/traffic.py
 ------------------
-Generadores de tráfico para la fase de detección y mitigación.
+Tráfico de la fase 3. No tiene generadores propios: llama a las mismas
+funciones de mininet_lab/traffic_generator.py que generaron el dataset,
+para que el tráfico que el modelo ve en vivo sea idéntico al del
+entrenamiento.
 
-NO tiene generadores propios: llama a las MISMAS funciones que generaron
-el dataset (mininet_lab/traffic_generator.py). Antes existía aquí una
-copia "equivalente" de cada ataque, pero en la práctica había divergido
-(otra duración de los nmap, pings e iperf distintos, ddos sin warmup ARP,
-spoofing lanzado con un Python sin scapy...). Cada diferencia cambia las
-features que ve el modelo en vivo respecto a las que vio al entrenar
-(training-serving skew). Reutilizando el mismo código, esa fuente de
-error desaparece por construcción.
+Solo ajusta lo que distingue la fase 3 de la generación del dataset:
+desactiva el tope de filas por fase (ENFORCE_ROW_CAP), usa su propio log
+y excluye el flood del DDoS según config.DEFENSE_DDOS_ALLOW_FLOOD.
 
-Qué se ajusta para la fase 3 (sin tocar la generación del dataset):
-  - ENFORCE_ROW_CAP = False: el tope de filas por fase solo tiene sentido
-    mientras se genera el CSV del dataset.
-  - LOG_FILE propio (logs/defense_traffic.log), para no mezclar la salida
-    de las herramientas con el log de la generación del dataset.
-  - DDoS con o sin la intensidad "--flood" según
-    config.DEFENSE_DDOS_ALLOW_FLOOD (por defecto, sin: con el modelo
-    clasificando en vivo, el flood total satura la CPU y cuelga Mininet).
-
-Cada generador devuelve los ACTORES de la prueba: las funciones de
-traffic_generator ya los devuelven (las mismas IPs que pasan a
-set_label(): atacante(s), víctima(s) e identidad suplantada). Además, set_label() escribe LABEL_FILE igual que
-en el dataset, y el controlador de defensa lo lee para calcular la
-etiqueta REAL de cada flujo con el mismo criterio que el entrenamiento.
+Cada generador devuelve los actores de la prueba (atacantes, víctimas,
+identidad suplantada), que set_label() también escribe en LABEL_FILE para
+que el controlador de defensa etiquete cada flujo con el mismo criterio
+que el entrenamiento.
 """
 import os
 import sys

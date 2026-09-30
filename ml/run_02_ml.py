@@ -1,26 +1,11 @@
 #!/usr/bin/env python3
 """
 ml/run_02_ml.py
--------------------
-Orquestador de la fase de ML: ejecuta preprocessing.py -> train.py ->
-evaluate.py en un solo comando, parando en cuanto falle alguno (no
-tiene sentido entrenar con datos que no se generaron bien, ni evaluar
-modelos que no se entrenaron).
-
-A diferencia de run_01_dataset.py (raíz del proyecto): aquí no hace falta
-coordinar procesos independientes (controlador Ryu + Mininet), ni
-privilegios de root, ni limpiar estado al terminar -son tres scripts
-secuenciales, cada uno leyendo lo que dejó el anterior-. Por eso este
-orquestador es mucho más simple: no necesita gestión de procesos ni
-señales, solo llamar a cada paso y parar si alguno lanza un error.
-
-Ejecución (sin sudo, a diferencia de run_01_dataset.py):
-    venv/bin/python3 ml/run_02_ml.py
-
-Equivale a ejecutar, en este orden:
-    venv/bin/python3 ml/preprocessing.py
-    venv/bin/python3 ml/train.py
-    venv/bin/python3 ml/evaluate.py
+---------------
+Orquestador de la fase 2: ejecuta preprocessing -> train -> evaluate en
+un solo comando y se detiene en cuanto uno falla.
+ 
+    venv/bin/python3 ml/run_02_ml.py    (sin sudo; ver EJECUCION.md)
 """
 import sys
 import time
@@ -38,6 +23,8 @@ STEPS = [
 
 
 def main():
+    """Ejecuta los tres pasos en orden, cronometrándolos, y aborta con el
+    traceback completo si alguno falla."""
     t_start = time.time()
     for name, step_fn in STEPS:
         print(f"\n{'=' * 60}\n{name}\n{'=' * 60}")
@@ -49,8 +36,8 @@ def main():
             # Traza completa: sin ella, un error solo dice el mensaje y no
             # dónde se produjo.
             traceback.print_exc()
-            print(f"[run_02_ml] Deteniendo -no tiene sentido seguir con el "
-                  f"siguiente paso si '{name}' no ha terminado bien-.")
+            print(f"[run_02_ml] Deteniendo: no tiene sentido seguir si "
+                  f"'{name}' no terminó bien.")
             sys.exit(1)
         print(f"[run_02_ml] '{name}' completado en {time.time() - t0:.1f}s")
 

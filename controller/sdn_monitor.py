@@ -1,27 +1,22 @@
 #!/usr/bin/env python3
 """
-sdn_monitor.py
---------------
-Controlador Ryu (OpenFlow 1.3) que combina:
-  1) Una lógica de conmutación L2 de tipo "learning switch",
-     implementada en el controlador, que instala reglas de flujo granulares
-     (por IP origen/destino, protocolo, puertos, o campos ARP) para que
-     cada "conversación" de red genere entradas de flujo diferenciadas.
-  2) Un monitor periódico que consulta OFPFlowStatsRequest a cada switch
-     conectado, calcula características derivadas (pps, bps, tamaño medio
-     de paquete, etc.) y guarda cada fila en un CSV listo para ML.
-
-La etiqueta (label) de cada fila se lee de un fichero de texto compartido
-(LABEL_FILE) que el script de generación de tráfico en Mininet va
-actualizando según la fase de tráfico activa (normal / scanning /
-spoofing / ddos). Así el controlador no necesita saber nada del
-generador de tráfico: solo lee "cuál es la fase actual".
-
-Ejecución:
-    ryu-manager sdn_monitor.py
-
-(normalmente no se necesita ejecutar esto directamente: se usa run_01_dataset.py
-en la raíz del proyecto, ver EJECUCION.md)
+controller/sdn_monitor.py
+-------------------------
+Controlador Ryu (OpenFlow 1.3) de la fase 1. Hace dos cosas:
+ 
+  1) Conmutación L2 con reglas de flujo granulares (por IP, protocolo,
+     puertos o campos ARP), de modo que cada conversación de red genera
+     entradas de flujo distintas y separables.
+  2) Un monitor que cada POLL_INTERVAL pide las estadísticas de flujo a
+     los switches, calcula características derivadas (pps, bps, tamaño
+     medio, consistencia IP/MAC, ARP no solicitado...) y escribe una fila
+     por flujo en el CSV del dataset.
+ 
+La etiqueta de cada fila se lee de LABEL_FILE, que el generador de
+tráfico actualiza según la fase activa. Así el controlador no necesita
+conocer el generador: solo lee la fase actual y sus actores.
+ 
+Lo lanza run_01_dataset.py; no se ejecuta directamente.
 """
 
 import csv
@@ -30,9 +25,7 @@ import sys
 import time
 from datetime import datetime
 
-# Red de seguridad: ver la misma nota en topology.py/traffic_generator.py.
-# Sin esto, "import config" depende enteramente de que "pip install -e ."
-# se haya ejecutado correctamente en el venv.
+# Permite "import config" sin depender de la instalación editable.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 
@@ -53,10 +46,9 @@ CSV_FILE = config.CSV_FILE
 POLL_INTERVAL = config.POLL_INTERVAL
 FLOW_IDLE_TIMEOUT = config.FLOW_IDLE_TIMEOUT
 # Margen para considerar que una respuesta ARP contesta a una petición
-# previa. Una resolución ARP legítima responde en milisegundos; 5s da
-# margen de sobra para retrasos de la red emulada sin llegar a tapar un
-# ARP gratuito (que no tiene NINGUNA petición previa, ni reciente ni
-# antigua). Ver self.recent_arp_requests.
+# previa. Una resolución legítima responde en milisegundos; 5s cubre los
+# retrasos de la red emulada sin llegar a tapar un ARP gratuito, que no
+# tiene ninguna petición previa. Ver self.recent_arp_requests.
 ARP_REQUEST_TTL = 5.0
 FLOW_HARD_TIMEOUT = config.FLOW_HARD_TIMEOUT
 
@@ -88,75 +80,46 @@ class SDNFlowMonitor(app_manager.RyuApp):
         super(SDNFlowMonitor, self).__init__(*args, **kwargs)
         self.mac_to_port = {}
         self.datapaths = {}
-        # flow_key -> (packet_count, byte_count, timestamp, flow_age)
-        # Guarda la lectura del ciclo anterior para calcular tasas diferenciales (pps y bps).
-        # flow_age (duración que reporta el switch) sirve además para
-        # detectar que un flujo ha expirado y se ha vuelto a instalar: si
-        # la duración va HACIA ATRÁS, los contadores del switch han
-        # vuelto a cero y no se puede comparar con la lectura anterior.
+        # flow_key -> (packet_count, byte_count, timestamp, flow_age).
+        # Lectura anterior de cada flujo, para las tasas diferenciales
+        # (pps, bps). flow_age detecta la reinstalación de un flujo: si su
+        # duración va hacia atrás, el switch reinició los contadores.
         self.prev_stats = {}
-        # flow_key -> (packet_count, byte_count)
-        # Compensación para el primer paquete de un flujo: el paquete que desencadena el 
-        # PacketIn no incrementa los contadores del FlowStats devuelto por el switch.
-        # Aquí se ANOTA lo que aún no se ha aplicado; al aplicarlo pasa a
-        # applied_offsets (ver abajo).
+        # flow_key -> (packet_count, byte_count) pendientes de aplicar. El
+        # paquete que dispara el PacketIn no lo cuenta el FlowStats del
+        # switch, así que se compensa aquí.
         self.pending_offsets = {}
-        # flow_key -> (packet_count, byte_count) ya aplicados a ese flujo.
-        # Existe porque la compensación debe mantenerse en TODOS los
-        # sondeos mientras el flujo viva, no solo en el primero: antes se
-        # hacía pending_offsets.pop() al escribir la fila, de modo que el
-        # primer sondeo llevaba la compensación y el siguiente ya no, y el
-        # contador acumulado BAJABA (p.ej. packet_count 1 -> 0), algo
-        # imposible en un contador de OpenFlow. Mismo criterio que
-        # pending_tcp_flags. Se descarta si el flujo se reinstala (sus
-        # contadores vuelven a cero y la compensación vieja ya no aplica).
+        # flow_key -> (packet_count, byte_count) de compensación ya
+        # aplicados. La compensación debe mantenerse en cada sondeo
+        # mientras el flujo viva; si solo se aplicara en el primero, el
+        # contador acumulado bajaría en el segundo, lo cual es imposible
+        # en OpenFlow. Se descarta al reinstalarse el flujo.
         self.applied_offsets = {}
-        # flow_key -> flags TCP (entero, bitmask) del PRIMER paquete del
-        # flujo -es el único momento en que el controlador ve el paquete
-        # completo, no solo el match agregado del FlowStats-. Señal útil
-        # para distinguir, p.ej., una sonda ACK suelta (solo ACK, nunca
-        # visto como primer paquete de una conexión legítima) de tráfico
-        # normal. No se hace pop() como con pending_offsets: el valor
-        # debe seguir disponible en CADA sondeo mientras el flujo viva,
-        # no solo en el primero.
+        # flow_key -> flags TCP del primer paquete (bitmask). Es el único
+        # momento en que el controlador ve el paquete completo. Útil para
+        # distinguir, p.ej., una sonda ACK del tráfico normal. Como las
+        # tres estructuras "pending_" siguientes, se conserva en cada
+        # sondeo mientras el flujo viva (sin pop).
         self.pending_tcp_flags = {}
-        # ip -> mac, la PRIMERA vez que se vio esa IP -nunca se
-        # sobrescribe a propósito, ni siquiera si llega un valor
-        # distinto después (eso sería justo lo que un ataque de
-        # spoofing intenta conseguir: que confiemos en la última
-        # afirmación, no en la primera). Es la "verdad" de referencia
-        # para detectar spoofing: comprobar si la MAC declarada de una
-        # IP coincide con la que se vio la primera vez. NO se limpia en
-        # los vaciados de tablas (_flush_all_flows) a propósito -a
-        # diferencia de mac_to_port, que es estado de conmutación
-        # transitorio, esto es identidad de host, que no cambia durante
-        # toda la tirada-.
+        # ip -> mac vista la PRIMERA vez, verdad de referencia contra la
+        # que se detecta el spoofing. Nunca se sobrescribe (aceptar la
+        # última afirmación es justo lo que busca un ataque) ni se limpia
+        # en los vaciados: es identidad de host, no estado transitorio.
         self.ip_to_mac = {}
-        # Se intenta cargar de forma diferida (no en __init__): el
-        # controlador arranca ANTES que topology.py escriba
-        # HOST_IDENTITY_FILE (el archivo no existe todavía en este
-        # punto). Ver _try_load_host_identities().
+        # ip_to_mac se siembra de HOST_IDENTITY_FILE de forma diferida, no
+        # en __init__: el controlador arranca antes de que topology.py
+        # escriba ese fichero. Ver _try_load_host_identities.
         self._host_identities_loaded = False
-        # flow_key -> 1 (consistente) / 0 (inconsistente, posible
-        # spoofing), calculado en el momento del packet_in contra
-        # ip_to_mac. Mismo patrón que pending_tcp_flags: no se hace
-        # pop(), debe seguir disponible en cada sondeo mientras el
-        # flujo viva.
+        # flow_key -> 1/0 según si la MAC declarada para la IP coincide
+        # con ip_to_mac. Calculado en el packet_in, conservado por sondeo.
         self.pending_ip_mac_consistent = {}
-        # IP consultada -> instante de la última PETICIÓN ARP por esa IP.
-        # Sirve para detectar RESPUESTAS ARP NO SOLICITADAS ("ARP
-        # gratuito"): en el funcionamiento normal, una respuesta ARP
-        # ("is-at") solo aparece después de que alguien haya preguntado
-        # por esa IP. El envenenamiento de caché ARP consiste justo en
-        # mandar respuestas que NADIE pidió, para que las víctimas
-        # actualicen su tabla con una MAC falsa -es el heurístico
-        # estándar de detección de ARP spoofing-.
-        # Confirmado en los datos: spoofing tiene un 84% de respuestas
-        # ARP frente al 49-59% de las demás clases.
+        # ip consultada -> instante de la última PETICIÓN ARP. Una
+        # respuesta ARP ("is-at") normal solo llega tras una petición; una
+        # que nadie pidió ("ARP gratuito") es la firma del envenenamiento
+        # de caché ARP.
         self.recent_arp_requests = {}
-        # flow_key -> 1 (respuesta no solicitada) / 0 (solicitada).
-        # Mismo patrón que pending_tcp_flags: sin pop(), debe seguir
-        # disponible en cada sondeo mientras el flujo viva.
+        # flow_key -> 1/0 según si la respuesta ARP fue no solicitada.
+        # Conservado por sondeo, como el resto de "pending_".
         self.pending_arp_unsolicited = {}
         self._last_label = None
         self._last_flush_request = None
@@ -186,12 +149,9 @@ class SDNFlowMonitor(app_manager.RyuApp):
             return "0"
 
     def _reset_label_file(self):
-        """Inicializa LABEL_FILE con "warmup" al arrancar el controlador.
-        
-        Previene etiquetar el arranque con valores de ejecuciones anteriores
-        interrumpidas y permite aislar el tráfico repetitivo de comprobación 
-        inicial (pingAll) de la clase de tráfico "normal" real.
-        """
+        """Deja LABEL_FILE en "warmup" al arrancar, para no heredar la
+        etiqueta de una ejecución anterior y para descartar el tráfico del
+        pingAll inicial."""
         try:
             with open(LABEL_FILE, "w") as f:
                 f.write("warmup,0")
@@ -199,6 +159,8 @@ class SDNFlowMonitor(app_manager.RyuApp):
             pass
 
     def _init_csv(self):
+        """Abre el CSV del dataset para escritura. Según config, archiva o
+        borra el anterior, y escribe la cabecera si el fichero es nuevo."""
         if config.RESET_DATASET_ON_START and os.path.exists(CSV_FILE):
             if config.ARCHIVE_PREVIOUS_DATASET:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -217,17 +179,10 @@ class SDNFlowMonitor(app_manager.RyuApp):
             self.csv_fp.flush()
 
     def _read_current_label(self):
-        """Devuelve (label, phase_id, actores) de la fase actual.
-
-        LABEL_FILE tiene el formato "label,phase_id,ip1|ip2|..." -el id y
-        los actores los escribe set_label() en el generador-. El id permite
-        distinguir fases CONSECUTIVAS DEL MISMO TIPO (que si no se
-        fusionarían en un solo grupo para GroupKFold); los actores
-        permiten etiquetar como ataque SOLO los flujos implicados, en vez
-        de todo el tráfico que coincida en el tiempo (ver
-        _label_for_flow). Se aceptan los formatos antiguos (solo "label",
-        o "label,phase_id") por compatibilidad.
-        """
+        """Devuelve (label, phase_id, actores) de la fase actual, leídos de
+        LABEL_FILE ("label,phase_id,ip1|ip2|..."). El phase_id distingue
+        fases consecutivas del mismo tipo; los actores permiten etiquetar
+        como ataque solo los flujos implicados (ver _label_for_flow)."""
         try:
             with open(LABEL_FILE, "r") as f:
                 raw = f.read().strip()
@@ -245,24 +200,17 @@ class SDNFlowMonitor(app_manager.RyuApp):
 
     @staticmethod
     def _label_for_flow(phase_label, actors, ip_src, ip_dst, arp_spa, arp_tpa):
-        """Etiqueta de UNA fila concreta dentro de una fase de ataque.
-
+        """Etiqueta de una fila concreta dentro de una fase de ataque.
+ 
         Devuelve la etiqueta del ataque solo si el flujo involucra a algún
-        actor del ataque (atacante, víctima o identidad suplantada);
-        "normal" en caso contrario.
-
-        Motivo: antes se etiquetaba TODO el tráfico que ocurriera durante
-        una fase de ataque con la etiqueta de esa fase -pero un escaneo lo
-        lanza UN host, y en esas fases aparecen ~12 hosts origen distintos:
-        la mayoría de filas eran tráfico legítimo de fondo con etiqueta de
-        ataque-. Esas etiquetas erróneas eran ruido puro e impedían separar
-        las clases: medido sobre datos reales, corregirlo sube el F1 de
-        0.60 a 0.70 sin tocar nada más. Es además el criterio estándar en
-        datasets de detección de intrusiones (CICIDS y similares etiquetan
-        por pareja origen/destino del ataque, no por franja horaria).
-
-        Si no hay actores (fase "normal", o CSV/generador antiguo sin ese
-        dato), se conserva la etiqueta de la fase tal cual.
+        actor (atacante, víctima o identidad suplantada), y "normal" en
+        caso contrario, de modo que el tráfico de fondo simultáneo al
+        ataque no se etiqueta como ataque. Es el criterio estándar en
+        datasets del área (CICIDS y similares etiquetan por pareja
+        origen/destino del ataque, no por franja temporal).
+ 
+        Sin actores (fase normal) se conserva la
+        etiqueta de la fase tal cual.
         """
         if not actors or phase_label in ("normal", "warmup"):
             return phase_label
@@ -310,17 +258,11 @@ class SDNFlowMonitor(app_manager.RyuApp):
         datapath.send_msg(mod)
 
     def _try_load_host_identities(self):
-        """Carga (una sola vez, en cuanto esté disponible) las parejas
-        IP/MAC reales de los hosts desde HOST_IDENTITY_FILE -escrito por
-        topology.py tras levantar la red, con host.IP()/host.MAC()-.
-
-        Se llama al principio de _packet_in_handler porque el
-        controlador arranca ANTES que topology.py escriba el archivo
-        -no se puede hacer en __init__, el archivo no existiría
-        todavía-. Una vez cargado (self._host_identities_loaded=True),
-        no vuelve a intentarlo -es barato comprobar el flag, no hace
-        falta más-.
-        """
+        """Siembra ip_to_mac desde HOST_IDENTITY_FILE la primera vez que el
+        fichero está disponible. Se llama desde _packet_in_handler, no
+        desde __init__, porque el controlador arranca antes de que
+        topology.py escriba el fichero. Si falla, ip_to_mac se aprende del
+        tráfico como alternativa."""
         if self._host_identities_loaded:
             return
         if not os.path.exists(config.HOST_IDENTITY_FILE):
@@ -340,29 +282,22 @@ class SDNFlowMonitor(app_manager.RyuApp):
                 "arranque-", config.HOST_IDENTITY_FILE, len(self.ip_to_mac),
             )
         except Exception as e:
-            # No crítico: si falla, ip_to_mac se sigue "aprendiendo" del
-            # primer paquete que llegue -el comportamiento previo, sin
-            # la mejora, pero sin romper nada-.
+            # No crítico: si falla, ip_to_mac se aprende del primer
+            # paquete de cada IP.
             self.logger.warning(
                 "No se pudieron cargar identidades de host desde %s: %s",
                 config.HOST_IDENTITY_FILE, e,
             )
 
     def _check_arp_solicited(self, arp_pkt):
-        """Para paquetes ARP, distingue respuestas SOLICITADAS de las que no.
-
-        Devuelve:
-          - None  si es una PETICIÓN (no aplica; además la registra para
-            poder comprobar las respuestas que lleguen después).
-          - 0     si es una respuesta que SÍ contesta a una petición
-            reciente (comportamiento normal).
-          - 1     si es una respuesta que NADIE pidió ("ARP gratuito"):
-            la firma clásica del envenenamiento de caché ARP.
-
-        Nota honesta: el ARP gratuito también existe de forma legítima
-        (un host anunciando un cambio de IP/MAC al arrancar), así que
-        esta señal por sí sola no prueba un ataque -es un indicio, y el
-        modelo la combina con el resto de características-.
+        """Para paquetes ARP, distingue respuestas solicitadas de las que no.
+ 
+        Devuelve None si es una petición (y la registra para comprobar las
+        respuestas posteriores), 0 si es una respuesta a una petición
+        reciente, y 1 si es una respuesta que nadie pidió ("ARP gratuito"),
+        firma del envenenamiento de caché ARP. El ARP gratuito también
+        existe de forma legítima, así que es un indicio, no una prueba: el
+        modelo lo combina con el resto de características.
         """
         now = time.time()
         # Limpiar peticiones caducadas para que el diccionario no crezca
@@ -373,11 +308,10 @@ class SDNFlowMonitor(app_manager.RyuApp):
                 if now - t <= ARP_REQUEST_TTL
             }
 
-        # Valores numéricos (1=petición, 2=respuesta) en vez de las
-        # constantes de Ryu: son los códigos estándar del protocolo ARP
-        # y coinciden con lo que aparece en la columna arp_opcode del
-        # CSV ya generado, así que no dependemos de cómo se llamen las
-        # constantes en la versión de Ryu instalada.
+        # Se usan los códigos numéricos del protocolo (1=petición,
+        # 2=respuesta), que coinciden con la columna arp_opcode del CSV y
+        # no dependen de cómo se llamen las constantes en esta versión de
+        # Ryu.
         if arp_pkt.opcode == 1:
             # Alguien pregunta "¿quién tiene dst_ip?" -> anotarlo.
             self.recent_arp_requests[arp_pkt.dst_ip] = now
@@ -392,7 +326,7 @@ class SDNFlowMonitor(app_manager.RyuApp):
 
     def _check_ip_mac(self, claimed_ip, claimed_mac):
         """Comprueba (y aprende, si es la primera vez) la relación IP->MAC.
-
+ 
         Devuelve 1 si la MAC declarada coincide con la primera vista
         para esa IP (o es la primera vez que se ve, nada que
         contradecir), 0 si NO coincide -señal de spoofing-. Ver
@@ -408,12 +342,9 @@ class SDNFlowMonitor(app_manager.RyuApp):
         return 1 if known_mac == claimed_mac else 0
 
     def _flow_key(self, dpid, get_field):
-        """Genera una tupla identificadora única (DNI) para cada flujo.
-        
-        Usa get_field para extraer de forma homogénea tanto diccionarios (PacketIn) 
-        como objetos OFPMatch (FlowStats), incluyendo campos L2/L3/L4 y ARP para 
-        evitar colisiones de contadores entre conversaciones distintas.
-        """
+        """Tupla que identifica un flujo de forma única, combinando dpid y
+        campos L2/L3/L4/ARP. get_field abstrae el origen (dict del PacketIn
+        u OFPMatch del FlowStats) para construirla igual en los dos casos."""
         return (
             dpid,
             get_field("eth_src", ""), get_field("eth_dst", ""),
@@ -431,9 +362,10 @@ class SDNFlowMonitor(app_manager.RyuApp):
     # ---------------------------------------------------------- #
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
-        """Maneja paquetes desconocidos (table-miss): aprende direcciones MAC,
-        construye reglas granulares (L2-L4/ARP) y reenvía el paquete inicial.
-        """
+        """Procesa un paquete desconocido: aprende su MAC, calcula las
+        señales del primer paquete (flags TCP, consistencia IP/MAC, ARP no
+        solicitado), instala una regla granular para el flujo y reenvía el
+        paquete."""
         self._try_load_host_identities()
 
         msg = ev.msg
@@ -500,9 +432,8 @@ class SDNFlowMonitor(app_manager.RyuApp):
             match_fields["arp_tpa"] = arp_pkt.dst_ip
             match_fields["arp_sha"] = arp_pkt.src_mac
             match_fields["arp_op"] = arp_pkt.opcode
-            # arp_pkt.src_mac (campo "sender hardware address" del propio
-            # ARP) en vez de "src" (eth_src de la trama) -es el campo que
-            # el spoofing de ARP manipula directamente, más preciso aquí-.
+            # arp_pkt.src_mac (el campo del propio ARP) en vez del eth_src
+            # de la trama: es el campo que el ARP spoofing manipula.
             ip_mac_consistent = self._check_ip_mac(arp_pkt.src_ip, arp_pkt.src_mac)
             arp_unsolicited = self._check_arp_solicited(arp_pkt)
 
@@ -537,7 +468,8 @@ class SDNFlowMonitor(app_manager.RyuApp):
     # Monitor periódico
     # ---------------------------------------------------------- #
     def _monitor_loop(self):
-        """Consulta periódicamente las estadísticas de flujo a todos los switches activos."""
+        """Pide las estadísticas de flujo a todos los switches cada
+        POLL_INTERVAL segundos."""
         while True:
             for dp in list(self.datapaths.values()):
                 self._request_flow_stats(dp)
@@ -547,16 +479,15 @@ class SDNFlowMonitor(app_manager.RyuApp):
     # Vigilancia de cambios de fase (label) y limpieza de flujos
     # ---------------------------------------------------------- #
     def _label_watch_loop(self):
-        """Vigila cambios de etiqueta o peticiones de purga para vaciar las tablas 
-        de flujo del switch y prevenir la contaminación entre fases.
-        """
+        """Vacía las tablas de flujo cuando cambia la fase o el generador
+        pide una purga, para que los flujos de una fase no contaminen la
+        siguiente."""
         while True:
             current_label, current_phase, _ = self._read_current_label()
-            # Comparar por (label, phase_id): así también se detecta el
-            # cambio entre dos fases CONSECUTIVAS DEL MISMO TIPO (p.ej.
-            # scanning -> scanning), que antes pasaban desapercibidas y
-            # no vaciaban las tablas -dejando que los flujos de la fase
-            # anterior contaminaran la siguiente-.
+            # Se compara por (label, phase_id): así también se detecta el
+            # cambio entre dos fases consecutivas del mismo tipo (p.ej.
+            # scanning -> scanning), que si no dejarían sus flujos activos
+            # contaminando la siguiente fase.
             current = (current_label, current_phase)
             flush_request = self._read_flush_request()
             need_flush = False
@@ -583,7 +514,8 @@ class SDNFlowMonitor(app_manager.RyuApp):
             hub.sleep(0.3)
 
     def _flush_all_flows(self):
-        """Elimina todos los flujos instalados en los switches y reinicia los contadores internos."""
+        """Borra todos los flujos de los switches, reinstala la regla
+        table-miss y reinicia el estado interno por flujo."""
         for dp in list(self.datapaths.values()):
             ofproto = dp.ofproto
             parser = dp.ofproto_parser
@@ -604,9 +536,9 @@ class SDNFlowMonitor(app_manager.RyuApp):
         self.pending_tcp_flags.clear()
         self.pending_ip_mac_consistent.clear()
         self.pending_arp_unsolicited.clear()
-        # NOTA: self.ip_to_mac NO se limpia aquí a propósito -es
-        # identidad de host (ver comentario en __init__), no estado de
-        # conmutación transitorio. Debe persistir toda la tirada.
+        # ip_to_mac NO se limpia aquí a propósito: es identidad de host
+        # (ver __init__), no estado de conmutación, y persiste toda la
+        # tirada.
 
     def _request_flow_stats(self, datapath):
         """Envía una petición de estadísticas de flujo (OFPFlowStatsRequest) al switch."""
@@ -616,9 +548,9 @@ class SDNFlowMonitor(app_manager.RyuApp):
 
     @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
     def _flow_stats_reply_handler(self, ev):
-        """Procesa las estadísticas recibidas, calcula características derivadas (pps/bps),
-        aplica compensaciones de primer paquete y escribe las muestras en el CSV.
-        """
+        """Por cada flujo activo: aplica la compensación del primer paquete,
+        calcula las tasas (pps, bps), determina la etiqueta por actores y
+        escribe la fila en el CSV."""
         body = ev.msg.body
         dpid = ev.msg.datapath.id
         phase_label, phase_id, actors = self._read_current_label()
@@ -657,30 +589,18 @@ class SDNFlowMonitor(app_manager.RyuApp):
 
             flow_key = self._flow_key(dpid, match.get)
 
-            # Flags TCP del primer paquete del flujo (guardados en
-            # _packet_in_handler, ver pending_tcp_flags). NO se hace
-            # pop(): debe seguir disponible en cada sondeo mientras el
-            # flujo viva, no solo en el primero. "" si no es TCP (ARP,
-            # ICMP, UDP) o si el flujo ya existía antes de arrancar el
-            # controlador -mismo criterio que el resto de campos "no
-            # aplica" del proyecto-.
+            # Flags TCP del primer paquete (ver pending_tcp_flags). "" si
+            # el flujo no es TCP o ya existía antes de arrancar el
+            # controlador, mismo criterio que el resto de campos "no aplica".
             tcp_flags = self.pending_tcp_flags.get(flow_key, "")
 
-            # Consistencia IP<->MAC (spoofing), mismo criterio que
-            # tcp_flags: "" si no se pudo calcular (p.ej. flujo previo
-            # al arranque del controlador).
+            # Consistencia IP<->MAC (spoofing); "" si no se pudo calcular.
             ip_mac_consistent = self.pending_ip_mac_consistent.get(flow_key, "")
 
-            # Respuesta ARP no solicitada (ARP gratuito): "" si el flujo
-            # no es una respuesta ARP (mismo criterio que el resto de
-            # columnas "no aplica").
+            # Respuesta ARP no solicitada; "" si el flujo no es respuesta ARP.
             arp_unsolicited_reply = self.pending_arp_unsolicited.get(flow_key, "")
 
-            # Sumar el offset de los paquetes que viajaron por PacketOut y
-            # que el switch NUNCA contó en su FlowStats. La compensación se
-            # ACUMULA y se mantiene en todos los sondeos mientras el flujo
-            # viva (ver applied_offsets en __init__); si se aplicara solo
-            # en el primero, el contador acumulado bajaría en el segundo.
+            # Compensación del primer paquete (ver applied_offsets):
             flow_age = stat.duration_sec + stat.duration_nsec / 1e9
             prev = self.prev_stats.get(flow_key)
             if prev is not None and flow_age + 1e-3 < prev[3]:

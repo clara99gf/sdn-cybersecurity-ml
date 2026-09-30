@@ -19,7 +19,7 @@ setup(
         "Generacion de dataset de trafico SDN (normal/scanning/spoofing/ddos) "
         "con Mininet y Ryu, mas preprocesado/entrenamiento/evaluacion de "
         "modelos de Machine Learning (Logistic Regression, Decision Tree, "
-        "Random Forest) para deteccion de amenazas."
+        "Random Forest) para detección de amenazas."
     ),
     py_modules=["config", "feature_windows"],
     packages=find_packages(
@@ -27,13 +27,16 @@ setup(
                  "ml", "ml.*", "defense", "defense.*"]
     ),
     install_requires=[
-        # Generación del dataset (Mininet/Ryu)
+        # Generación del dataset (Mininet/Ryu). eventlet se fija porque
+        # las versiones recientes rompen Ryu (setup.sh aplica además un
+        # parche a ryu/app/wsgi.py por el mismo motivo).
         "ryu",
+        "eventlet<0.36",
         "scapy",
         # Preprocesado / entrenamiento / evaluación (ml/)
         "scikit-learn",
         "pandas",
-        "numpy",
+        "numpy<2",
         "matplotlib",
         "joblib",
         # Fase de detección/mitigación: % CPU del proceso Ryu para la
@@ -41,5 +44,7 @@ setup(
         # controlador funciona igual pero no registra CPU.
         "psutil",
     ],
-    python_requires=">=3.7",
+    # Ryu (poco mantenido) no funciona en Python 3.11+ por su
+    # incompatibilidad con eventlet. El entorno de referencia es 3.10.
+    python_requires=">=3.8,<3.11",
 )

@@ -1,14 +1,9 @@
 """
 ml/utils.py
 -----------
-Utilidades de persistencia para el pipeline de preprocesado /
-entrenamiento / evaluación: guardar y cargar los conjuntos de datos
-procesados (CSV/NPY) y los artefactos (modelos, scaler, encoders...).
-
-Adaptado del utils.py original de Clara: mismo comportamiento, solo se
-cambia "from config.config import ..." por "import config" para que
-encaje con el estilo de este proyecto (config.py es un módulo suelto
-en la raíz, no un paquete config/config.py).
+Funciones de persistencia del pipeline de ML: guardar y cargar el
+dataset procesado (X, y, groups) y los artefactos entrenados (modelos,
+scaler, encoders...).
 """
 import os
 from typing import Any, Tuple
@@ -25,11 +20,10 @@ import config
 # -------------------------------------------------------------------------
 
 def save_full_dataset(X: pd.DataFrame, y: np.ndarray, groups: np.ndarray) -> None:
-    """Guarda el dataset completo ya limpio/codificado (SIN dividir en
-    train/test, SIN escalar, SIN seleccionar características -eso se hace
-    dentro de cada fold de la validación cruzada, ver ml/evaluate.py-),
-    junto con 'groups' (a qué fase/episodio pertenece cada fila, para
-    GroupKFold)."""
+    """Guarda el dataset ya limpio y codificado (X, y, groups), sin dividir,
+    escalar ni seleccionar características: eso se hace dentro de cada fold
+    (ver ml/evaluate.py). 'groups' indica la fase de cada fila, para
+    GroupKFold."""
     os.makedirs(config.DATA_PROCESSED_DIR, exist_ok=True)
     X.to_csv(os.path.join(config.DATA_PROCESSED_DIR, "X.csv"), index=False)
     np.save(os.path.join(config.DATA_PROCESSED_DIR, "y.npy"), y)
@@ -62,7 +56,6 @@ def save_artifact(obj: Any, filename: str) -> None:
     joblib.dump(obj, path)
     print(f"[+] Objeto guardado en: {path}")
 
-
 def load_artifact(filename: str) -> Any:
     """Carga cualquier objeto (modelo, scaler, encoder) desde la carpeta models/."""
     path = os.path.join(config.MODELS_DIR, filename)
@@ -71,12 +64,14 @@ def load_artifact(filename: str) -> Any:
     return joblib.load(path)
 
 
-# Alias semánticos para mantener compatibilidad total
+# Alias más explícitos para cuando el objeto guardado es un modelo.
 save_model = save_artifact
 load_model = load_artifact
 
 
 def load_artifacts() -> Tuple[Any, list, Any, dict]:
-    """Carga en bloque los 4 artefactos principales de preprocesamiento para inferencia."""
+    """Carga en bloque los 4 artefactos que necesita la inferencia: scaler,
+    características seleccionadas, encoder de la etiqueta y encoders de las
+    categóricas."""
     artifact_files = ["scaler.pkl", "selected_features.pkl", "le_y.pkl", "encoders.pkl"]
     return tuple(load_artifact(fn) for fn in artifact_files)

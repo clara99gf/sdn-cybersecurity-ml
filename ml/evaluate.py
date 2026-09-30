@@ -2,50 +2,28 @@
 """
 ml/evaluate.py
 --------------
-Evalúa los tres modelos con validación cruzada AGRUPADA POR FASE
-(GroupKFold): en cada partición, TODAS las filas de una misma fase de
-tráfico van juntas a un solo lado (entrenamiento o prueba), nunca
-repartidas entre los dos.
-
-Por qué esto y no un train_test_split aleatorio de toda la vida:
-las filas de una misma fase están muy correladas entre sí (mismo
-atacante, misma víctima, segundos de diferencia). Con un split
-aleatorio por fila, es fácil que filas casi gemelas de la MISMA fase
-acaben unas en train y otras en test -el modelo no está generalizando
-a un ataque nuevo, está reconociendo fragmentos de un ataque que ya
-vio en parte durante el entrenamiento-, lo que infla el F1 medido de
-forma artificial. Comprobado empíricamente sobre este dataset: con
-split aleatorio por fila el F1 de Random Forest salía en 0.777;
-agrupando por fase completa baja a ~0.46 -la diferencia es demasiado
-grande para ignorarla-.
-
-Además, un solo split agrupado (un único 80/20 por fases) es MUY
-inestable -probado con distintas semillas, el F1 osciló entre 0.38 y
-0.60 según qué fases en concreto caían en el test-. Por eso se usa
-GroupKFold con varias particiones (N_CV_FOLDS), no un único split: se
-promedia el resultado de varias particiones distintas, dando una
-estimación mucho más estable Y sin la fuga de información entre fases.
-
-El escalado y la selección de características se hacen DENTRO de cada
-fold (ajustados solo con los datos de entrenamiento de ESE fold), no
-una vez para todo el dataset -si no, la fuga de información reaparece
-por otra vía-.
-
-Genera los tres entregables pedidos:
-  1. Tabla (CSV) + gráfico de barras comparando Accuracy/Precision/
-     Recall/F1-Score de los tres modelos (media entre folds). El mejor
-     modelo se elige por F1-score medio (criterio principal, según la
-     metodología del TFG).
-  2. Matrices de confusión: un PNG por modelo (3 en total), construidas
-     a partir de las predicciones "out-of-fold" (cada fila predicha
-     exactamente una vez, por un modelo que nunca vio su propia fase).
-  3. Tabla (CSV) de coste computacional: tiempo de entrenamiento del
-     modelo final (medido en train.py, sobre todo el dataset) y tiempo
-     de inferencia por flujo (medido aquí, promediado entre folds).
-
-Precision/Recall/F1 se calculan con promedio "macro" (todas las clases
-pesan igual, no según su nº de muestras) -coherente con usar
-class_weight="balanced" en el entrenamiento-.
+Evalúa los tres modelos con validación cruzada agrupada por fase
+(GroupKFold): en cada partición, todas las filas de una misma fase van
+juntas a train o a test, nunca repartidas.
+ 
+Se agrupa por fase porque las filas de una misma fase están muy
+correladas (mismo atacante, misma víctima, segundos de diferencia): un
+split aleatorio por fila dejaría filas casi gemelas a los dos lados, y el
+modelo "reconocería" en test fragmentos que ya vio en train, inflando el
+F1 sin medir generalización real. Se usan varias particiones, y no un
+único split, porque un solo split agrupado es muy inestable según qué
+fases caigan en test; promediar varias da una estimación más estable.
+ 
+El escalado y la selección de características se hacen dentro de cada
+fold, ajustados solo con su parte de entrenamiento, para que la fuga de
+información no reaparezca por esa vía.
+ 
+Genera tres entregables: la tabla y el gráfico de métricas de los tres
+modelos (el mejor se elige por F1 macro), una matriz de confusión por
+modelo (con predicciones out-of-fold, cada fila predicha por un modelo
+que no vio su fase), y la tabla de coste computacional (entrenamiento e
+inferencia). Precision/recall/F1 se promedian en "macro", para que todas
+las clases pesen igual.
 """
 import os
 import sys
@@ -93,6 +71,8 @@ MODEL_NAMES = {
 
 
 def select_features_for_fold(X_train_scaled: pd.DataFrame, y_train) -> list:
+    """Devuelve las N_FEATURES más importantes según un Random Forest
+    ajustado solo con los datos de entrenamiento de este fold."""
     rf = RandomForestClassifier(
         n_estimators=200, random_state=config.RANDOM_STATE,
         class_weight="balanced", n_jobs=-1,
@@ -141,14 +121,10 @@ def cross_validate_model(model_ctor, X, y, groups, n_splits=N_CV_FOLDS):
 
 
 def per_class_metrics(y_true, y_pred, class_names, model_display_name):
-    """Precision / recall / F1 y nº de muestras POR CLASE, a partir de las
-    predicciones out-of-fold.
-
-    Las métricas macro dicen cómo va el modelo en conjunto, pero no qué
-    ataque detecta mejor o peor, que es lo que interesa discutir en la
-    memoria -y lo que permite comparar directamente con la tabla por clase
-    de la detección en vivo (fase 3)-. Antes había que sacarlo a mano de
-    la matriz de confusión."""
+    """Precision, recall, F1 y nº de muestras por clase, a partir de las
+    predicciones out-of-fold. Complementa las métricas macro: muestra qué
+    ataque se detecta mejor o peor, y es directamente comparable con la
+    tabla por clase de la detección en vivo (fase 3)."""
     p, r, f, n = precision_recall_fscore_support(
         y_true, y_pred, labels=range(len(class_names)), zero_division=0)
     return pd.DataFrame({
@@ -185,18 +161,11 @@ def plot_confusion_matrix(cm, class_names, model_display_name, out_path):
 
 
 def plot_cost_bar(cost_df, out_path):
-    """Coste computacional por modelo, en DOS PANELES.
-
-    Antes era un solo gráfico con las dos series en el mismo eje
-    logarítmico, y eso mezclaba unidades distintas (segundos de
-    entrenamiento frente a milisegundos por flujo): comparar la altura de
-    unas barras con las otras no significaba nada. Con un panel por
-    métrica, cada una tiene su escala y su unidad, y la comparación que se
-    lee es la que tiene sentido: la de los tres modelos entre sí.
-
-    El panel de inferencia va en escala logarítmica porque entre modelos
-    hay dos órdenes de magnitud de diferencia; en lineal, las barras de
-    los dos modelos rápidos serían invisibles."""
+    """Coste computacional por modelo, en dos paneles con su propia escala
+    (entrenamiento en segundos, inferencia en ms por flujo), porque son
+    unidades distintas y compararlas entre sí no tendría sentido. La
+    inferencia va en escala logarítmica: entre modelos hay dos órdenes de
+    magnitud, y en lineal los dos rápidos serían invisibles."""
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4.5))
     models = cost_df["model"]
     ax1.bar(models, cost_df["training_time_s"], color="#2980b9")
@@ -216,6 +185,9 @@ def plot_cost_bar(cost_df, out_path):
 
 
 def main():
+    """Evalúa los tres modelos con GroupKFold y guarda las tablas, las
+    matrices de confusión, la comparativa de coste y el mejor modelo
+    (best_model.pkl)."""
     X, y, groups = load_full_dataset()
     le_y = load_artifact("le_y.pkl")
     class_names = list(le_y.classes_)

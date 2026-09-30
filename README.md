@@ -1,4 +1,4 @@
-# Detección y mitigación de amenazas en SDN con Machine Learning (TFG)
+# Detección y mitigación de amenazas en SDN con Machine Learning 
 
 Sistema que combina Redes Definidas por Software (SDN) e Inteligencia
 Artificial para detectar y mitigar en tiempo real ataques de **scanning**,
@@ -13,11 +13,13 @@ El proyecto se divide en tres fases:
 | 2. Machine Learning | `ml/run_02_ml.py` | Preprocesa, entrena Logistic Regression, Decision Tree y Random Forest, y los evalúa con validación cruzada agrupada por fase | `models/`, `results/` |
 | 3. Detección y mitigación | `run_03_defense.py` | El controlador clasifica cada flujo en vivo con el mejor modelo y bloquea las conversaciones de ataque con reglas OpenFlow DROP | `results/events/`, `results/figures/defense/`, `results/tables/` |
 
-- **Instalación**: `./setup.sh` (Ubuntu; instala Mininet, Open vSwitch,
-  nmap, hping3, iperf y crea el entorno virtual con Ryu, scapy y
-  scikit-learn). `requirements.txt` documenta las versiones exactas con
-  las que se obtuvieron estos resultados: para replicarlas,
-  `./venv/bin/pip install -r requirements.txt` después de `setup.sh`.
+- **Instalación**: `./setup.sh` (Ubuntu, Python 3.8-3.10; instala
+  Mininet, Open vSwitch, nmap, hping3, iperf y crea el entorno virtual
+  con Ryu, scapy y scikit-learn, aplicando el parche de compatibilidad
+  que Ryu necesita con eventlet). `requirements.txt` documenta las
+  versiones exactas con las que se obtuvieron estos resultados: para
+  replicarlas, `./venv/bin/pip install -r requirements.txt` después de
+  `setup.sh`.
 - **Ejecución paso a paso**: [`EJECUCION.md`](EJECUCION.md).
 - **Parámetros**: todos centralizados en `config.py`, con una sección por fase.
 
@@ -34,100 +36,28 @@ El proyecto se divide en tres fases:
 
 ## Resultados
 
-Resumen; el detalle está en `results/` (tablas CSV y figuras) y el
-análisis completo, en la memoria del TFG.
+Los resultados completos se encuentran en `results/` y el análisis detallado
+en la memoria del TFG, en `docs/`.
 
 ### Fase 1: el dataset
 
-293.852 flujos útiles repartidos en 909 fases de tráfico
-(`results/tables/dataset_summary.csv`):
-
-| Clase | Flujos | % | Fases en las que aparece |
-|---|---|---|---|
-| normal | 135.183 | 46,0 | 675 |
-| scanning | 57.714 | 19,6 | 179 |
-| ddos | 54.847 | 18,7 | 239 |
-| spoofing | 46.108 | 15,7 | 214 |
-
-Se generaron **dos datasets independientes** con idéntica configuración,
-para tener una referencia de cuánto varía el resultado entre
-generaciones. Random Forest obtuvo F1 macro de 0,726 ± 0,024 y
-0,753 ± 0,020 respectivamente. La diferencia entre generaciones (0,027)
-es del mismo orden que la dispersión entre particiones dentro de cada
-una, lo que indica que el procedimiento de generación es razonablemente
-estable. Los resultados que siguen corresponden a la **segunda
-generación**, que es la más reciente y la que entrena el modelo
-desplegado en la fase 3.
+Se obtuvieron **293.852 flujos útiles**, distribuidos en **909 fases de
+tráfico**, correspondientes a tráfico normal, scanning, DDoS y spoofing.
 
 ### Fase 2: evaluación offline
 
-Validación cruzada `GroupKFold` de 5 particiones, agrupando por fase.
-Gana **Random Forest**, con un **F1 macro de 0,753 ± 0,020**, frente a
-0,668 del árbol de decisión y 0,539 de la regresión logística.
-
-| Clase | Precisión | Recall | F1 |
-|---|---|---|---|
-| scanning | 0,891 | 0,818 | 0,853 |
-| normal | 0,721 | 0,885 | 0,795 |
-| spoofing | 0,842 | 0,610 | 0,708 |
-| ddos | 0,762 | 0,576 | 0,656 |
-
-Las características más determinantes son el número de flujos activos en
-el switch, las de ventana temporal (flujos y orígenes distintos hacia un
-mismo destino en los últimos 5 s) y la duración del flujo. El coste de
-inferencia del modelo elegido es de 0,0033 ms por flujo en lote.
-
-De las 22 características disponibles se conservan las 15 más
-importantes dentro de cada partición. Es una decisión de parsimonia, no
-de rendimiento ni de coste: con las 22 el F1 macro de Random Forest es
-0,7536 y con 15 es 0,7528, una diferencia (0,0008) veinticinco veces
-menor que la dispersión entre particiones, mientras que las 7
-descartadas suman solo un 6,1 % de la importancia total. La regresión
-logística sí mejora con las 22 (0,539 a 0,565), al ser lineal y
-aprovechar cualquier señal residual, pero no cambia qué modelo gana.
+La evaluación mediante `GroupKFold` de 5 particiones, agrupando por fase,
+seleccionó **Random Forest** como modelo con mejor rendimiento, con un
+**F1 macro de 0,753 ± 0,020**.
 
 ### Fase 3: detección y mitigación en vivo
 
-Diez repeticiones de la batería completa (los cuatro tipos de tráfico,
-30 s cada uno), 14.906 flujos clasificados. **La detección y la
-mitigación se miden por separado**, porque el bloqueo altera el tráfico
-que se está observando (ver "Limitaciones").
+En 10 ejecuciones de la batería completa, la detección obtuvo un
+**F1 macro de 0,814 ± 0,078**.
 
-**Detección** (`defense_detection_by_class.csv`), con el mismo criterio
-de etiqueta que la fase 2 y por tanto comparable con ella: **F1 macro de
-0,814 ± 0,078** entre las diez ejecuciones (0,865 agrupando los 14.906
-flujos).
-
-| Clase | Precisión | Recall | F1 |
-|---|---|---|---|
-| scanning | 0,986 | 0,958 | 0,972 |
-| spoofing | 0,879 | 0,860 | 0,869 |
-| normal | 0,760 | 0,920 | 0,832 |
-| ddos | 0,927 | 0,685 | 0,788 |
-
-**Mitigación** (`defense_mitigation_by_conversation.csv`), medida sobre
-la unidad en la que decide el controlador, la conversación MAC origen →
-MAC destino: de las 397 conversaciones de ataque, **se bloquearon 387
-(recall 0,975)**, con 24 conversaciones legítimas bloqueadas por error
-(precisión 0,942, F1 0,958). El primer bloqueo llega **en torno a 2 s**
-desde el primer flujo del ataque (1,9 s en spoofing, 2,2 s en DDoS,
-2,6 s en scanning), en las 10 de 10 ejecuciones de cada tipo.
-
-El umbral de confirmación (`DEFENSE_MITIGATION_CONFIRMATIONS`) es el
-número de sondeos distintos, dentro de una ventana de 5 s, en los que
-una conversación debe salir clasificada como ataque antes de bloquearla.
-Se usa 3: un ataque real es sostenido y aparece sondeo tras sondeo,
-mientras que un error aislado del modelo no se repite, de modo que el
-umbral filtra los falsos positivos sin retrasar apenas la respuesta
--con un sondeo por segundo, tres confirmaciones se acumulan en unos
-2 s-.
-
-**Impacto en infraestructura**
-(`defense_infrastructure_by_traffic.csv`): la CPU del proceso Ryu se
-mantiene entre el 4,2 % y el 7,7 % de media según el tipo de tráfico
-(con picos puntuales de hasta el 100 % durante el DDoS), la latencia del
-plano de control entre 9,1 y 18,6 ms, y la inferencia entre 0,73 y
-2,19 ms por flujo.
+A nivel de mitigación, se bloquearon **387 de 397 conversaciones de ataque
+(recall 0,975)**. Se produjeron además 24 bloqueos de conversaciones
+legítimas.
 
 ## Decisiones de diseño principales
 
@@ -142,7 +72,7 @@ plano de control entre 9,1 y 18,6 ms, y la inferencia entre 0,73 y
   (`feature_windows.py`) y el mismo criterio de etiquetado, para evitar
   diferencias entre lo que el modelo vio al entrenar y lo que ve en vivo.
 - **Mitigación por conversación**: se bloquea el par MAC origen → MAC
-  destino, en todos los switches, tras confirmarlo en dos sondeos, y
+  destino, en todos los switches, tras confirmarlo en tres sondeos, y
   con una regla temporal (20 s). Así un falso positivo corta una
   conversación durante un tiempo acotado, no un host entero.
 - **Detección y mitigación medidas por separado**: la primera por flujo,
@@ -156,10 +86,7 @@ plano de control entre 9,1 y 18,6 ms, y la inferencia entre 0,73 y
   atacantes). Con dos generaciones se puede decir que la diferencia
   observada es pequeña (0,726 frente a 0,753), pero no estimar una
   dispersión con rigor: para eso harían falta varias tiradas más, de unas
-  cuatro horas cada una, y queda fuera del alcance de este trabajo. La
-  dispersión entre particiones de `GroupKFold` (±0,020) mide la
-  estabilidad del modelo dentro de una generación, no entre generaciones
-  distintas.
+  cuatro horas cada una, y queda fuera del alcance de este trabajo.
 - **La batería de la fase 3 también es estocástica.** Cada ejecución
   sortea atacantes, víctimas y variantes de cada ataque, y el F1 macro
   por ejecución varía entre 0,672 y 0,927 dentro de una misma batería
@@ -184,14 +111,11 @@ plano de control entre 9,1 y 18,6 ms, y la inferencia entre 0,73 y
   obtuvieron.
 - **Detección por volumen.** El modelo identifica el DDoS principalmente
   por su tasa de paquetes, así que un ataque lento y sostenido, por
-  debajo de esa tasa, podría pasar desapercibido. Es la principal vía de
-  evasión del enfoque y queda como trabajo futuro.
+  debajo de esa tasa, podría pasar desapercibido.
 - **Coste de los falsos positivos.** Aunque en flujos son pocos (24 de
   4.065, un 0,6 %), medidos por conversación son 2,4 de las 12,4 activas
   en cada prueba de tráfico normal: alrededor de una de cada cinco
-  conversaciones legítimas sufre un corte de 20 s en algún momento. Es la
-  principal limitación práctica del sistema: reducirlo más exigiría
-  subir el umbral de confirmación o requerir la confirmación en varios
+  conversaciones legítimas sufre un corte de 20 s en algún momento. Reducirlo más podría requerir subir el umbral de confirmación o requerir la confirmación en varios
   switches, a costa de retrasar la respuesta ante un ataque real.
 - **El recall de mitigación mide cobertura, no supresión continua**: una
   conversación cuenta como bloqueada si se le aplicó un DROP en algún
@@ -199,7 +123,7 @@ plano de control entre 9,1 y 18,6 ms, y la inferencia entre 0,73 y
   se desbloquea y se vuelve a bloquear.
 - Las fases de ataque se generan sin tráfico legítimo concurrente, y en
   la fase 3 el DDoS se lanza sin la intensidad `--flood` (satura la CPU
-  con el modelo clasificando en vivo), que sí está en el dataset.
+  del entorno de emulación de red), que sí está en el dataset.
 - El criterio de actores incluye a la víctima: en DDoS y spoofing, un
   flujo entre la víctima y un host ajeno también contaría como ataque.
 - La vinculación IP↔MAC de referencia (`ip_mac_consistent`) se toma de
@@ -233,21 +157,18 @@ ml/
 defense/
   traffic.py            Fase 3: lanza el tráfico de cada prueba
   plots.py              Fase 3: gráficas y tablas de resultados
-docs/                   Memoria del TFG y documentación de apoyo
+docs/                   Memoria del TFG 
 data/                   Dataset (dataset_sdn.csv) y datos procesados
-models/                 Modelos entrenados (se generan, no se versionan)
+models/                 Modelos entrenados 
 results/                Métricas, tablas y figuras de las fases 2 y 3
 logs/, runtime/         Logs y ficheros de coordinación entre procesos
 ```
 
 ## Ficheros versionados
 
-`data/dataset_sdn.csv` se incluye en el repositorio porque generarlo
-lleva unas cuatro horas. Solo se versiona la generación con la que se
-entrena el modelo desplegado; la otra se conserva fuera del repositorio. Los modelos (`models/*.pkl`) y los datos
+Los modelos (`models/*.pkl`) y los datos
 procesados no se incluyen: se regeneran en unos tres minutos con
-`ml/run_02_ml.py` (además, `random_forest.pkl` supera el límite de
-tamaño de GitHub). `results/` sí se incluye, como evidencia directa de
+`ml/run_02_ml.py`. `results/` sí se incluye, como evidencia directa de
 los resultados, incluido `results/events/` con el registro por flujo de
 la última batería. En `docs/` está la memoria del TFG, que es el
 documento donde se analizan en detalle estos resultados.

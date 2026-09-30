@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 feature_windows.py
--------------------
+------------------
 Ventana deslizante temporal con la que se calculan las características
 de "patrón entre flujos": cuántos eventos y cuántos valores distintos ha
 registrado una clave en los últimos segundos.

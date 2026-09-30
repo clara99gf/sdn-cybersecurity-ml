@@ -1,75 +1,31 @@
 #!/usr/bin/env python3
 """
 ml/preprocessing.py
---------------------
-Preprocesado del dataset_sdn.csv (generado por run_01_dataset.py) para
-entrenar Logistic Regression, Decision Tree y Random Forest.
-
-Pasos (en este orden, y por qué):
-  0. Calcular características de VENTANA TEMPORAL (5s hacia atrás en
-     el tiempo, sin fuga de información): puertos y destinos distintos
-     tocados por el mismo origen, y cuántos flujos/orígenes distintos
-     han llegado al mismo destino, en los últimos 5s. Una fila aislada
-     no puede ver esto -es el PATRÓN entre flujos lo que distingue
-     mejor los ataques entre sí (muchos puertos/destinos desde un
-     origen = escaneo; muchos orígenes a un destino = DDoS
-     distribuido)-. Usa ip_src/ip_dst/timestamp SOLO como cálculo
-     intermedio -esas columnas se descartan después igual que
-     siempre-. Se calcula con `feature_windows.WindowTracker`, un
-     módulo COMPARTIDO (no exclusivo de este script): se usa aquí en
-     modo lote (recorriendo el CSV ya ordenado por tiempo), y la
-     misma clase se reutilizará sin cambios cuando se aborde la fase
-     de detección en vivo, alimentada evento a evento desde el
-     controlador -evitando que el cálculo "en entrenamiento" y "en
-     producción" diverjan (training-serving skew)-. Se calcula en
-     preprocessing ("offline") y no en el generador SDN porque no hace
-     falta regenerar el dataset de Mininet/Ryu (ya validado en muchas
-     rondas) para iterar sobre esto, y la metodología del TFG ya pide
-     evaluación offline.
-  1. Quitar las filas de warmup (pingAll de arranque; no representa
-     ninguna de las 4 clases que se quieren clasificar).
-  2. Filtrar duplicados.
-  3. Eliminar identificadores rígidos (IP, MAC, timestamp, dpid): con
-     solo 16 hosts y 5 switches en el laboratorio, el modelo podría
-     memorizar qué IP/MAC concretas aparecen en qué clase en vez de
-     aprender patrones de tráfico generalizables.
-  4. Filtrar valores nulos/infinitos derivados de indeterminaciones en
-     las métricas de tráfico (packet_count_per_second,
-     byte_count_per_second, avg_packet_size). OJO: esto es distinto
-     del NaN "estructural" que aparece en puertos/campos ARP según el
-     protocolo de cada fila (un flujo UDP no tiene tcp_dst_port) -eso
-     NO es un dato corrupto, así que no se elimina la fila, se rellena
-     con 0 (ver STRUCTURAL_NA_COLUMNS)-.
-  5. Codificación numérica de variables categóricas (eth_type,
-     ip_proto, arp_opcode) con LabelEncoder.
-  6. Reconstruir a qué "fase" (episodio de tráfico) pertenece cada
-     fila, a partir de los cambios de la propia etiqueta en orden
-     temporal. NECESARIO para poder evaluar con GroupKFold en
-     ml/evaluate.py: las filas de una misma fase están muy correladas
-     entre sí (mismo atacante, misma víctima, segundos de diferencia),
-     así que un split aleatorio por fila (que reparte filas de la
-     MISMA fase entre train y test) infla el rendimiento medido de
-     forma artificial -el modelo "reconoce" fragmentos casi idénticos
-     de un ataque que ya vio en parte durante el entrenamiento, no
-     está generalizando a un ataque nuevo de verdad. Comprobado
-     empíricamente: con split aleatorio por fila el F1 de Random
-     Forest salía en 0.777; agrupando por fase completa (ninguna fase
-     repartida entre train y test) baja a ~0.46 -ESTE es el número que
-     refleja de verdad la capacidad de generalización a un ataque
-     nunca visto-.
-
-NOTA IMPORTANTE sobre el escalado y la selección de características:
-ya NO se hacen aquí. Antes se hacían una única vez, sobre un solo
-split -pero eso mismo filtraba información entre fases de train y
-test igual que el problema de arriba-. Ahora se hacen DENTRO de cada
-fold de la validación cruzada agrupada (ver ml/evaluate.py), ajustando
-el scaler y seleccionando características solo con los datos de
-entrenamiento de ESE fold.
-
-El balanceo de clases NO se toca aquí: se aplica en ml/train.py vía
-class_weight="balanced" en los propios modelos -una solución
-algorítmica e integrada en scikit-learn, no una manipulación de los
-datos (nada de sobremuestreo/duplicado de filas)-.
+-------------------
+Prepara dataset_sdn.csv (fase 1) para el entrenamiento. Deja el dataset
+limpio y codificado, pero sin escalar ni seleccionar características: eso
+se hace dentro de cada fold de la validación cruzada (ml/evaluate.py)
+para no filtrar información entre fases. El balanceo de clases tampoco se
+toca aquí; se resuelve en ml/train.py con class_weight="balanced".
+ 
+Pasos:
+  0. Calcular las 4 características de ventana temporal (patrón entre
+     flujos en los últimos WINDOW_SECONDS segundos; ver
+     add_temporal_window_features).
+  1. Reconstruir la fase de tráfico de cada fila (para agrupar en
+     GroupKFold; ver reconstruct_phase_groups).
+  2. Quitar las filas de warmup (el pingAll de arranque, que no es
+     ninguna de las 4 clases).
+  3. Quitar duplicados.
+  4. Eliminar identificadores del laboratorio (IP, MAC, timestamp,
+     dpid): con solo 16 hosts, el modelo podría memorizarlos en vez de
+     aprender patrones de tráfico.
+  5. Eliminar columnas constantes de configuración.
+  6. Tratar nulos e infinitos: las tasas con indeterminación aritmética
+     eliminan la fila; los campos que "no aplican" a un protocolo (un
+     flujo UDP no tiene puertos TCP) se rellenan con 0.
+  7. Codificar las categóricas (eth_type, ip_proto, arp_opcode,
+     tcp_flags) con LabelEncoder.
 """
 import os
 import sys
@@ -84,60 +40,40 @@ from sklearn.preprocessing import LabelEncoder
 
 from ml.utils import save_artifact, save_full_dataset
 
-# Ventana temporal (segundos) para las características de patrón entre
-# flujos. El valor vive en config.py porque el clasificador en vivo
-# (controller/live_classifier.py) tiene que usar EXACTAMENTE el mismo:
-# si no, el modelo vería en detección una característica calculada de
-# otra forma que al entrenar. Allí está el porqué del valor elegido.
+# Ventana temporal (segundos) de las características de patrón entre
+# flujos. Se lee de config.py, que el clasificador en vivo usa también
+# (deben coincidir). Ver config.WINDOW_SECONDS.
 WINDOW_SECONDS = config.WINDOW_SECONDS
 
-# Interruptor para poder reproducir la comparación "con vs. sin
-# características de ventana temporal" (ablation study) cuando se
-# quiera, sin tener que editar el código -solo cambiar esta variable
-# (o pasar include_window_features=False a main())-.
+# Con False, main() genera el dataset sin las 4 características de ventana
+# temporal, para poder comparar el rendimiento con y sin ellas.
 INCLUDE_TEMPORAL_WINDOW_FEATURES = True
 
-# Columnas auxiliares SOLO para calcular las features de ventana
-# temporal -se añaden a los identificadores a eliminar después-.
+# Columnas auxiliares que solo sirven para calcular las características de
+# ventana; se eliminan después junto con los identificadores.
 _WINDOW_HELPER_COLS = ["_src_id", "_dst_id", "_dst_port"]
 
 
 def add_temporal_window_features(df: pd.DataFrame, window_s: int = WINDOW_SECONDS) -> pd.DataFrame:
-    """Añade 4 características de PATRÓN entre flujos (no de un flujo
-    aislado), con una ventana deslizante hacia atrás de window_s
-    segundos (nunca mira al futuro respecto al timestamp de cada fila
-    -sin fuga de información-):
-
-      - distinct_ports_by_src_{w}s: nº de puertos destino distintos
-        tocados por el mismo origen -alto en escaneo de puertos-. Solo
-        cuenta filas con puerto REAL: las filas sin puerto (ARP/ICMP,
-        el 87% de scanning) heredan el último valor de su origen, en
-        vez de contaminar el contador con el relleno -1 (bug real: al
-        ser -1 un valor único, el contador salía siempre 1 incluso en
-        pleno escaneo).
-      - distinct_targets_by_src_{w}s: nº de destinos distintos tocados
-        por el mismo origen -alto en escaneo de red (cambia de host
-        objetivo, no solo de puerto)-.
-      - flows_to_target_{w}s: nº de flujos hacia el mismo destino Y
-        MISMO PUERTO (mismo servicio concreto, no toda la IP) -alto
-        cuando un objetivo/servicio recibe mucho tráfico-.
-      - distinct_sources_to_target_{w}s: nº de orígenes distintos que
-        han apuntado al mismo destino Y MISMO PUERTO -alto en DDoS
-        distribuido (muchos atacantes, un servicio). Contar por
-        (destino, puerto) y no solo destino evita que tráfico NO
-        relacionado hacia la misma IP en otro puerto (coincidencia de
-        host reutilizado en otra fase) infle el contador como si
-        fueran atacantes reales convergiendo-.
-
-    Usa WindowTracker (ver feature_windows.py), la MISMA clase que se
-    reutilizará en la futura fase de detección en vivo -aquí se
-    alimenta fila a fila en orden temporal (modo lote); en el
-    controlador se alimentaría evento a evento en tiempo real-, para
-    que el cálculo de las features sea idéntico en entrenamiento y en
-    producción.
-
-    ip_src/ip_dst/timestamp se usan SOLO aquí como cálculo intermedio;
-    drop_identifier_columns() las elimina después como siempre.
+    """Añade 4 características de patrón entre flujos, con una ventana que
+    mira window_s segundos hacia atrás (nunca al futuro, para no filtrar
+    información):
+ 
+      - distinct_ports_by_src: puertos destino distintos por origen; alto
+        en escaneo de puertos.
+      - distinct_targets_by_src: destinos distintos por origen; alto en
+        escaneo de red.
+      - flows_to_target: flujos hacia el mismo (destino, puerto); alto
+        cuando un servicio recibe mucho tráfico.
+      - distinct_sources_to_target: orígenes distintos hacia el mismo
+        (destino, puerto); alto en DDoS distribuido. Se cuenta por
+        (destino, puerto) y no solo por destino para no confundir con un
+        DDoS el tráfico no relacionado hacia otra IP reutilizada.
+ 
+    Usa el WindowTracker compartido con la detección en vivo, de modo que
+    la característica se calcula igual al entrenar (modo lote, aquí) y al
+    clasificar (evento a evento, en el controlador). ip_src/ip_dst/
+    timestamp se usan solo como cálculo intermedio y se eliminan después.
     """
     df = df.copy()
     df["timestamp"] = pd.to_datetime(df["timestamp"])
@@ -154,16 +90,11 @@ def add_temporal_window_features(df: pd.DataFrame, window_s: int = WINDOW_SECOND
     dst_ids = df["_dst_id"].to_numpy()
     dst_ports = df["_dst_port"].to_numpy()
 
-    src_port_tracker = WindowTracker(window_s)   # clave: origen  -> valor: puerto destino
-    src_dst_tracker = WindowTracker(window_s)    # clave: origen  -> valor: destino
-    # clave: (destino, puerto) -> valor: origen. Con clave = destino A
-    # SECAS (como estaba antes), cualquier tráfico NO relacionado hacia
-    # la misma IP en OTRO puerto (de otra fase distinta, coincidencia
-    # de host reutilizado) infla el contador igual que si fueran
-    # atacantes reales convergiendo -diluye justo la señal que debería
-    # distinguir DDoS (varios orígenes, MISMO servicio) de tráfico
-    # normal-. Con (destino, puerto), solo cuenta tráfico hacia el
-    # mismo servicio concreto.
+    src_port_tracker = WindowTracker(window_s)   # origen  -> puerto destino
+    src_dst_tracker = WindowTracker(window_s)    # origen -> destino
+    # Clave (destino, puerto), no solo destino: así solo cuenta tráfico
+    # hacia el mismo servicio concreto, y no confunde con un DDoS el
+    # tráfico hacia otro puerto de una IP reutilizada en otra fase.
     dst_src_tracker = WindowTracker(window_s)
 
     n = len(df)
@@ -177,18 +108,10 @@ def add_temporal_window_features(df: pd.DataFrame, window_s: int = WINDOW_SECOND
     last_ports_by_src = {}
 
     for i in range(n):
-        # Solo alimentar el contador de puertos si la fila TIENE puerto
-        # real. El 87% de las filas de scanning son ARP/ICMP (sin
-        # puerto) y recibían el relleno -1: al ser -1 un valor único,
-        # el contador de "puertos distintos" salía siempre 1, incluso
-        # en pleno escaneo de 30 puertos -la feature no medía nada-.
-        # Confirmado con datos: media 1.09 en scanning, igual que en
-        # normal (1.12), e importancia casi nula en el modelo (0.009).
-        # Ignorando las filas sin puerto, el contador refleja solo
-        # puertos reales tocados por ese origen -que es lo que
-        # distingue un escaneo de puertos-. Las filas sin puerto
-        # arrastran el último valor conocido de su origen (0 si aún no
-        # hay ninguno), en vez de resetearlo a 1 artificialmente.
+        # El contador de puertos solo se alimenta con filas que tienen
+        # puerto real. Las filas sin puerto (ARP/ICMP) heredan el último
+        # valor de su origen en vez de contar su relleno -1 como un puerto
+        # más, que falsearía el recuento en pleno escaneo.
         if dst_ports[i] >= 0:
             _, distinct_ports[i] = src_port_tracker.add(src_ids[i], dst_ports[i], ts[i])
             last_ports_by_src[src_ids[i]] = distinct_ports[i]
@@ -255,12 +178,12 @@ def drop_constant_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def clean_nulls_and_infinites(df: pd.DataFrame, groups: np.ndarray = None):
-    """Devuelve (df, groups). groups se filtra igual que las filas: si se
-    elimina una fila y no se elimina su grupo, X y groups quedan
-    desalineados y GroupKFold agruparía por la fase equivocada. Hoy no se
-    elimina ninguna fila, pero el desajuste sería silencioso."""
-    # Infinitos en las tasas derivadas (indeterminaciones aritméticas
-    # reales) -> se tratan como NaN y esas filas se eliminan.
+    """Elimina las filas con tasas indeterminadas (inf/NaN) y rellena con 0
+    los campos que no aplican al protocolo de la fila. Devuelve (df,
+    groups); groups se filtra con la misma máscara que las filas, para que
+    no queden desalineados con GroupKFold."""
+    # Un inf/NaN en las tasas es una indeterminación aritmética real: se
+    # elimina la fila.
     before = len(df)
     df[config.RATE_COLUMNS] = df[config.RATE_COLUMNS].replace([np.inf, -np.inf], np.nan)
     mask = df[config.RATE_COLUMNS].notna().all(axis=1)
@@ -270,40 +193,28 @@ def clean_nulls_and_infinites(df: pd.DataFrame, groups: np.ndarray = None):
     if before != len(df):
         print(f"[preprocessing] Filas con tasas nulas/infinitas eliminadas: {before - len(df)}")
 
-    # NaN ESTRUCTURAL (puertos/campos ARP que no aplican a ese
-    # protocolo): NO es un dato perdido, se rellena con 0 en vez de
-    # eliminar la fila -eliminar destruiría casi todo el dataset, ya
-    # que una fila IP nunca tiene campos ARP y viceversa-.
+    # NaN estructural (campos que no aplican al protocolo): no es un dato
+    # perdido, se rellena con 0. Eliminar la fila destruiría casi todo el
+    # dataset, porque una fila IP nunca tiene campos ARP y viceversa.
     struct_cols = [c for c in config.STRUCTURAL_NA_COLUMNS if c in df.columns]
     df[struct_cols] = df[struct_cols].fillna(0)
     return df, groups
 
 
 def reconstruct_phase_groups(df: pd.DataFrame) -> np.ndarray:
-    """Devuelve a qué "fase" (episodio de tráfico) pertenece cada fila.
-
-    Usa la columna `phase_id` que escribe el controlador -un contador
-    incremental que traffic_generator.py aumenta en cada set_label()-.
-
-    Antes esto se DEDUCÍA de los cambios de etiqueta, y tenía un fallo
-    real: como el generador elige el tipo de fase al azar, salen a menudo
-    varias fases SEGUIDAS DEL MISMO TIPO (en una tirada real, hasta 7
-    fases de scanning consecutivas), y todas se fusionaban en un único
-    grupo enorme -menos grupos, mucho más desiguales, y una evaluación
-    GroupKFold bastante menos fiable-.
-
-    Es necesario para evaluar con GroupKFold (ver evaluate.py): las filas
-    de una MISMA fase están muy correladas entre sí (mismo atacante,
-    misma víctima, segundos de diferencia) -si el split de train/test las
-    reparte al azar entre las dos, el modelo puede "reconocer" en test
-    fragmentos casi idénticos de un ataque que ya vio en train, inflando
-    el F1 de forma artificial sin medir generalización real a un ataque
-    nuevo-. Agrupando por fase y sin repartir ninguna entre train y test,
-    se evita ese problema.
-
-    Compatibilidad: si el CSV es de una tirada ANTIGUA (sin columna
-    `phase_id`), se recurre al método anterior por cambios de etiqueta,
-    avisando de que los grupos serán menos precisos.
+    """Devuelve la fase de tráfico a la que pertenece cada fila, con la que
+    GroupKFold agrupa en la evaluación.
+ 
+    Usa la columna `phase_id`, un contador que traffic_generator.py
+    incrementa en cada set_label(). Es un identificador explícito, y no
+    los cambios de etiqueta, porque el tipo de fase se sortea y salen
+    varias del mismo tipo seguidas: por cambios de etiqueta se fundirían
+    en un solo grupo.
+ 
+    Agrupar por fase es necesario porque las filas de una misma fase están
+    muy correladas (mismo atacante, misma víctima, segundos de
+    diferencia): repartirlas entre train y test inflaría el F1 sin medir
+    generalización real (ver evaluate.py).
     """
     if "phase_id" in df.columns:
         df = df.sort_values("timestamp") if not df["timestamp"].is_monotonic_increasing else df
@@ -318,6 +229,9 @@ def reconstruct_phase_groups(df: pd.DataFrame) -> np.ndarray:
 
 
 def encode_categoricals(df: pd.DataFrame) -> tuple:
+    """Codifica las columnas categóricas con LabelEncoder. Devuelve el df y
+    los encoders ajustados, que la fase 3 reutiliza para codificar igual en
+    vivo."""
     encoders = {}
     for col in config.CATEGORICAL_COLUMNS:
         if col not in df.columns:
@@ -333,7 +247,7 @@ def summarize_dataset(df: pd.DataFrame, groups) -> pd.DataFrame:
     """Tabla descriptiva del dataset que se va a entrenar: por clase, nº de
     flujos, porcentaje, nº de fases de tráfico distintas (los grupos de la
     validación cruzada) y reparto por protocolo.
-
+ 
     Se calcula aquí, justo después de descartar el warmup y los duplicados
     y antes de codificar, que es cuando el dataset ya es el definitivo
     pero las columnas siguen siendo legibles (ip_proto/eth_type sin
@@ -375,6 +289,9 @@ def summarize_dataset(df: pd.DataFrame, groups) -> pd.DataFrame:
 
 
 def main(include_window_features: bool = INCLUDE_TEMPORAL_WINDOW_FEATURES):
+    """Ejecuta el preprocesado completo y guarda (X, y, groups) y los
+    encoders. Con include_window_features=False omite las 4 características
+    de ventana temporal, para comparar el rendimiento con y sin ellas."""
     df = load_raw_data()
 
     if include_window_features:
@@ -382,12 +299,10 @@ def main(include_window_features: bool = INCLUDE_TEMPORAL_WINDOW_FEATURES):
         df = add_temporal_window_features(df)
     else:
         print("\n[preprocessing] Características de ventana temporal DESACTIVADAS "
-              "(include_window_features=False) -para comparar con/sin-.")
-        print(f"[preprocessing] AVISO: esto va a SOBRESCRIBIR los resultados en "
-              f"{config.DATA_PROCESSED_DIR} y {config.MODELS_DIR} con la versión "
-              f"SIN estas características -no se guarda en ningún sitio aparte-. "
-              f"Si quieres conservar ambas versiones, haz una copia antes o usa un "
-              f"script aparte (como se hizo para la comparación con/sin).")
+              "(include_window_features=False).")
+        print(f"[preprocessing] AVISO: sobrescribe {config.DATA_PROCESSED_DIR} y "
+              f"{config.MODELS_DIR} con la versión sin estas características. Haz "
+              f"una copia antes si quieres conservar ambas.")
 
     df["timestamp"] = pd.to_datetime(df["timestamp"])
     df = df.sort_values("timestamp").reset_index(drop=True)
@@ -419,10 +334,9 @@ def main(include_window_features: bool = INCLUDE_TEMPORAL_WINDOW_FEATURES):
 
     print(f"\n[preprocessing] Preprocesado completado. {X.shape[0]} filas, "
           f"{X.shape[1]} columnas, {len(set(groups))} fases (grupos).")
-    print("[preprocessing] NOTA: el escalado y la selección de características "
-          "se hacen ahora dentro de cada fold de la validación cruzada, no "
-          "aquí -para no filtrar información entre fases de train y test-. "
-          "Ver ml/train.py y ml/evaluate.py.")
+    print("[preprocessing] El escalado y la selección de características se "
+          "hacen dentro de cada fold (ml/train.py, ml/evaluate.py), no aquí, "
+          "para no filtrar información entre fases.")
 
 
 if __name__ == "__main__":

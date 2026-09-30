@@ -3,21 +3,21 @@
 run_03_defense.py
 -----------------
 Orquestador de la FASE DE DETECCIÓN Y MITIGACIÓN (tercera fase del TFG).
-
+ 
 Menú interactivo en terminal que permite:
   - Lanzar tráfico de UN tipo (normal / ddos / scanning / spoofing) y ver
     cómo el controlador lo detecta y mitiga en vivo.
   - Lanzar la BATERÍA COMPLETA: los cuatro tipos en secuencia, con estado
     limpio entre cada uno, y generar todas las gráficas y tablas al final.
   - Salir limpiando el entorno (mn -c, matar Ryu).
-
+ 
 Para regenerar gráficas y tablas a partir de un CSV ya recogido (sin
 volver a lanzar la red): venv/bin/python3 defense/plots.py [csv]
-
+ 
 Levanta por su cuenta el controlador de defensa (controller/sdn_defense.py)
 y la topología Mininet, igual que run_01_dataset.py hace con la de
 generación. Requiere sudo (Mininet).
-
+ 
 Uso:
     sudo venv/bin/python3 run_03_defense.py
 """
@@ -31,8 +31,7 @@ from functools import partial
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config
 
-# Ruta ABSOLUTA: antes era relativa y solo funcionaba lanzando el script
-# desde la raíz del proyecto.
+# Ruta absoluta, para poder lanzarlo desde cualquier directorio.
 CONTROLLER = os.path.join(config.CONTROLLER_DIR, "sdn_defense.py")
 
 # Las pruebas sueltas escriben su gráfica aquí, separadas de las de la
@@ -128,6 +127,8 @@ def _set_active(active, kind="", run=1):
 # Arranque y parada del entorno
 # --------------------------------------------------------------------- #
 def _start_controller():
+    """Arranca sdn_defense.py con ryu-manager en segundo plano y espera a
+    que escuche en el puerto OpenFlow."""
     ryu_cmd = _ryu_command()
     log_path = os.path.join(config.LOGS_DIR, "ryu_defense.log")
     print(f"*** Arrancando el controlador de defensa...")
@@ -173,19 +174,16 @@ def _start_controller():
 
 
 def _ryu_command():
-    """Comando para lanzar ryu-manager de forma que tenga acceso a las
-    dependencias del venv (pandas, scikit-learn, joblib) -que el
-    controlador de defensa necesita para cargar el modelo-.
+    """Comando para lanzar Ryu utilizando el Python del entorno virtual.
 
-    El problema: 'ryu-manager' suele estar instalado en el Python del
-    SISTEMA (el venv se crea con --system-site-packages para ver Mininet),
-    pero pandas/sklearn están en el venv. Si se lanza el ryu-manager del
-    sistema a secas, no encuentra pandas y el controlador muere.
+    El controlador de defensa necesita, además de Ryu, dependencias como
+    pandas, scikit-learn y joblib. Por ello, Ryu se ejecuta mediante el
+    Python del venv, que tiene acceso a las dependencias instaladas en él
+    y, gracias a --system-site-packages, también a los paquetes de Python
+    instalados a nivel de sistema.
 
-    Solución: ejecutar ryu-manager A TRAVÉS del Python del venv
-    (venv/bin/python3 -m ryu.cmd.manager), que sí ve tanto las libs del
-    venv como -por --system-site-packages- las del sistema (ryu).
-    Si no hay venv, se cae al ryu-manager del sistema como último recurso.
+    Si no existe el venv, se intenta utilizar el ryu-manager disponible
+    en el sistema como último recurso.
     """
     venv_py = os.path.join(config.PROJECT_ROOT, "venv", "bin", "python3")
     if os.path.exists(venv_py):
@@ -204,6 +202,8 @@ def _port_open(ip, port):
 
 
 def _build_net():
+    """Levanta la topología Mininet (idéntica a la de la fase 1) y la
+    conecta al controlador de defensa."""
     from mininet.net import Mininet
     from mininet.node import RemoteController
     from mininet.topolib import TreeTopo
@@ -219,14 +219,14 @@ def _build_net():
         for intf in node.intfNames():
             if intf != "lo":
                 node.cmd(f"ethtool -K {intf} tso off gso off gro off 2>/dev/null")
-                # Igual que topology.py en la fase 1 (antes faltaba aquí):
-                # afecta al tamaño de los segmentos TCP y, con ello, a
-                # byte_count / avg_packet_size.
+                # Debe coincidir con topology.py (fase 1): afecta al tamaño
+                # de los segmentos TCP y, con ello, a byte_count y
+                # avg_packet_size, que el modelo vio al entrenar.
                 node.cmd(f"ip link set dev {intf} gso_max_size 1514 2>/dev/null")
     # Esperar a que los 5 switches se conecten al controlador (igual que
-    # topology.py en la fase 1: 5s). Con menos tiempo, algún switch aún no
-    # tiene la regla table-miss instalada cuando empieza el tráfico, y sus
-    # paquetes se caen -era la causa de los pings perdidos-.
+    # topology.py en la fase 1: 5 s). Así se garantiza que todos tienen
+    # instalada la regla table-miss antes de comenzar el tráfico y se evita
+    # la pérdida de paquetes al inicio. 
     print("*** Esperando a que los switches se conecten al controlador...")
     time.sleep(5)
     # Un primer pingAll actúa de calentamiento: puebla las tablas ARP y
@@ -248,7 +248,7 @@ def _build_net():
     # Igual que la fase 1 (STARTUP_SETTLE_SECONDS en generate_dataset):
     # dejar que expiren los flujos del pingAll antes de la primera prueba.
     # En el dataset ese tráfico queda como "warmup" y se descarta al
-    # entrenar; aquí se clasificaba como si fuera la prueba.
+    # entrenar.
     print(f"*** Esperando {config.STARTUP_SETTLE_SECONDS}s a que expiren los "
           f"flujos del pingAll...")
     time.sleep(config.STARTUP_SETTLE_SECONDS)
@@ -256,6 +256,8 @@ def _build_net():
 
 
 def _cleanup(controller_proc=None, net=None):
+    """Detiene la red y el controlador y limpia el estado de Mininet
+    (mn -c), devolviendo al usuario la propiedad de los ficheros."""
     print("\n*** Limpiando entorno...")
     _set_active(False)  # quitar el flag de detección si quedó activo
     if net is not None:
@@ -278,6 +280,8 @@ def _cleanup(controller_proc=None, net=None):
 # Pruebas de tráfico
 # --------------------------------------------------------------------- #
 def _run_single(net, kind, duration=None, reset=True, plot=True, summary=True, run=1):
+    """Ejecuta una prueba de un tipo de tráfico: activa la detección,
+    lanza el tráfico, la desactiva y genera su resumen y su gráfica."""
     global _tests_run
     _tests_run += 1
     from defense import traffic, plots
@@ -338,8 +342,7 @@ def _run_single(net, kind, duration=None, reset=True, plot=True, summary=True, r
 # Ctrl+C en el menú, no hay resultados nuevos que mirar-.
 _tests_run = 0
 # True si la última prueba lanzada se cortó a medias (Ctrl+C): lo que haya
-# en el CSV es un trozo de prueba, no un experimento completo, y hay que
-# avisarlo para no usarlo por error en la memoria.
+# en el CSV es un trozo de prueba, no un experimento completo.
 _test_interrupted = False
 # Ejecución de la batería en curso (nº actual, total) o None si lo que se
 # está ejecutando es una prueba suelta. Sirve para avisar con precisión si
@@ -362,7 +365,7 @@ def _print_summary():
     flujo (columna true_label, que el controlador calcula con el mismo
     criterio que el dataset: un flujo es ataque si involucra a un actor
     de la prueba). Así se mide lo mismo que en la validación de la fase 2.
-
+ 
     Se agrupa por CLASE REAL (no por prueba), con los mismos cálculos que
     results/tables/defense_detection_by_class.csv, para que la terminal y
     la tabla den siempre las mismas cifras. Si la batería se repitió, se
@@ -456,6 +459,8 @@ def _print_summary():
 
 
 def _run_battery(net):
+    """Ejecuta la batería completa: los cuatro tipos en secuencia,
+    repetidos DEFENSE_BATTERY_RUNS veces, y genera las tablas y gráficas."""
     # La batería es un experimento propio: empieza borrando TODO (métricas
     # y gráficas anteriores) y encadena los 4 tipos SIN resetear ni
     # graficar entre ellos (plot=False), para que el CSV final contenga
@@ -510,12 +515,10 @@ def _make_plots():
 
 def _reset_all(silent=False, single=False):
     """Borra lo de tandas anteriores para que cada prueba empiece de cero.
-
+ 
     single=True (pruebas sueltas del menú): borra el CSV de eventos y solo
-    las gráficas de results/figures/defense/single/, su propia carpeta. NO
-    toca las gráficas ni las tablas de la batería, que son las que van a
-    la memoria y están versionadas -antes, probar la opción 2 las borraba
-    todas y había que regenerarlas-.
+    las gráficas de results/figures/defense/single/. No toca las gráficas
+    ni las tablas de la batería, que son las versionadas para la memoria.
     single=False (batería): borra además las gráficas y tablas de la
     batería, que es la que las genera.
     El controlador repone la cabecera del CSV en el siguiente evento
@@ -549,20 +552,20 @@ MENU = f"""
   FASE 3 - DETECCIÓN Y MITIGACIÓN (menú)
 ============================================================
   Cada opción borra los resultados anteriores y genera los suyos.
-  Consejo: prueba primero los tipos por separado (1-4). La batería (5)
-  encadena los 4 y exige más al entorno.
-  1) Tráfico NORMAL   -> genera su gráfica
-  2) Tráfico SCANNING -> genera su gráfica
-  3) Tráfico DDOS     -> genera su gráfica
-  4) Tráfico SPOOFING -> genera su gráfica
+  1) Tráfico NORMAL   
+  2) Tráfico SCANNING 
+  3) Tráfico DDOS     
+  4) Tráfico SPOOFING 
   5) BATERÍA COMPLETA -> los 4 tipos, {config.DEFENSE_BATTERY_RUNS} veces seguidas
-                         (DEFENSE_BATTERY_RUNS en config.py): gráficas y tablas
+                         (DEFENSE_BATTERY_RUNS en config.py)
   6) Salir (limpia el entorno: mn -c)
 ============================================================
 """
 
 
 def main():
+    """Levanta el controlador y la red y ofrece el menú interactivo,
+    limpiando el entorno al salir. Requiere sudo."""
     global _test_interrupted, _battery_running
     if os.geteuid() != 0:
         print("Este script necesita sudo (Mininet).")

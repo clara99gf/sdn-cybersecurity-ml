@@ -1,31 +1,27 @@
-"""
-sdn_defense.py
---------------
-Controlador Ryu para la FASE DE DETECCIÓN Y MITIGACIÓN en vivo.
-
-A diferencia de controller/sdn_monitor.py (que solo OBSERVA y escribe un
-CSV etiquetado para entrenar), este controlador:
-
-  1. Conmuta y sondea las estadísticas de flujo EXACTAMENTE igual que el
-     monitor (mismas reglas granulares, mismos timeouts, mismo cálculo de
-     contadores y tasas) -cualquier diferencia aquí cambiaría las
-     features respecto al entrenamiento (training-serving skew)-.
-  2. Clasifica cada flujo EN VIVO con el modelo entrenado
-     (controller/live_classifier.py), con el mismo preprocesado.
-  3. MITIGA: cuando una conversación (par MAC origen -> MAC destino) se
-     clasifica como ataque de forma repetida, instala en TODOS los
-     switches una regla OpenFlow de prioridad alta y acción DROP para
-     ese par (ver _mitigate para el porqué de hacerlo así).
-  4. Registra métricas en results/events/defense_events.csv: por cada
-     flujo evaluado guarda la predicción, la etiqueta REAL (calculada con
-     el mismo criterio que el dataset), el tiempo de inferencia, la
-     latencia del plano de control y si se aplicó DROP.
-
-El CPU del proceso Ryu se muestrea en un hilo aparte y se vuelca también
-al CSV de eventos (gráfica/tabla CPU vs latencia).
-
-Uso (lo lanza run_03_defense.py; no suele ejecutarse a mano):
-    ryu-manager controller/sdn_defense.py
+""""
+controller/sdn_defense.py
+-------------------------
+Controlador Ryu de la fase 3: detección y mitigación en vivo.
+ 
+A diferencia de sdn_monitor.py (que solo observa y escribe el CSV), este
+controlador:
+ 
+  1. Conmuta y sondea las estadísticas igual que el monitor (mismas
+     reglas, timeouts y cálculo de contadores y tasas); cualquier
+     diferencia cambiaría las características respecto al entrenamiento.
+  2. Clasifica cada flujo en vivo con el modelo (live_classifier.py).
+  3. Mitiga: cuando una conversación (par MAC origen -> destino) se
+     clasifica como ataque de forma repetida, instala en todos los
+     switches una regla DROP de prioridad alta (ver _mitigate).
+  4. Registra en results/events/defense_events.csv, por cada flujo, la
+     predicción, la etiqueta real (mismo criterio que el dataset), el
+     tiempo de inferencia, la latencia del plano de control y si se
+     bloqueó. La CPU del proceso Ryu se muestrea en un hilo aparte.
+ 
+El criterio de etiqueta real se importa de sdn_monitor.py, no se copia,
+para que signifique lo mismo que al entrenar.
+ 
+Lo lanza run_03_defense.py; no se ejecuta a mano.
 """
 import csv
 import os
@@ -34,10 +30,9 @@ import threading
 import time
 from datetime import datetime
 
-# ryu-manager ejecuta este archivo directamente (no como parte del
-# paquete 'controller'), así que se añaden al sys.path la raíz del
-# proyecto (para 'import config') y la carpeta controller/ (para
-# 'import live_classifier' y 'import sdn_monitor').
+# ryu-manager ejecuta este archivo directamente, no como parte del
+# paquete 'controller', así que se añaden al path la raíz (para 'config')
+# y controller/ (para 'live_classifier' y 'sdn_monitor').
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
 for _p in (_ROOT, _HERE):
@@ -46,11 +41,10 @@ for _p in (_ROOT, _HERE):
 
 import config
 from live_classifier import LiveClassifier
-# Criterio de etiquetado por flujo: se REUTILIZA el del monitor que generó
-# el dataset (no una copia), para que la "etiqueta real" de la fase 3
-# signifique exactamente lo mismo que la etiqueta con la que se entrenó.
-# (Importar la clase no la arranca: ryu-manager solo lanza las apps
-# definidas en el propio módulo que se le pasa, sdn_defense.)
+# Se reutiliza el criterio de etiquetado del monitor (no una copia), para
+# que la etiqueta real de la fase 3 signifique lo mismo que al entrenar.
+# Importar la clase no la arranca: ryu-manager solo lanza la app del
+# módulo que se le pasa.
 from sdn_monitor import SDNFlowMonitor
 
 from ryu.base import app_manager
@@ -76,9 +70,9 @@ _label_for_flow = SDNFlowMonitor._label_for_flow
 # Parámetros (los de conmutación/sondeo, IGUALES que en el dataset)
 # --------------------------------------------------------------------- #
 POLL_INTERVAL = config.POLL_INTERVAL
-# Los timeouts de las reglas de reenvío deben ser IGUALES que en la
-# generación del dataset: determinan cuánto vive un flujo en el switch y,
-# por tanto, flow_count_per_dpid -la feature más importante del modelo-.
+# Los timeouts deben ser iguales que en el dataset: determinan cuánto vive
+# un flujo en el switch y, con ello, flow_count_per_dpid, la característica
+# más importante del modelo.
 FLOW_IDLE_TIMEOUT = config.FLOW_IDLE_TIMEOUT
 FLOW_HARD_TIMEOUT = config.FLOW_HARD_TIMEOUT
 ARP_REQUEST_TTL = 5.0      # igual que sdn_monitor.py
@@ -181,8 +175,7 @@ class SDNDefense(app_manager.RyuApp):
         self._warned_missing_ports = False
         self._init_events_csv()
 
-        # Vigilante de la etiqueta: replica SDNFlowMonitor._label_watch_loop
-        # de la fase 1 (ver _label_watch_loop aquí abajo).
+        # Vigilante de la etiqueta (ver _label_watch_loop).
         self._last_phase_key = None
         self.monitor_thread = hub.spawn(self._monitor_loop)
         hub.spawn(self._label_watch_loop)
@@ -278,6 +271,9 @@ class SDNDefense(app_manager.RyuApp):
     # ------------------------------------------------------------------ #
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in(self, ev):
+        """Conmuta el paquete, instala una regla granular para el flujo y
+        registra las señales del primer paquete (flags TCP, consistencia
+        IP/MAC, ARP no solicitado). Copia del monitor."""
         self._load_host_identities()
         msg = ev.msg
         dp = msg.datapath
@@ -362,22 +358,17 @@ class SDNDefense(app_manager.RyuApp):
             hub.sleep(POLL_INTERVAL)
 
     def _label_watch_loop(self):
-        """Vacía las tablas en CADA set_label(), igual que hace el monitor
-        de la fase 1 (SDNFlowMonitor._label_watch_loop).
-
-        Sin esto había una diferencia real entre fases. Los generadores de
-        scanning y de ddos hacen un warmup ARP (un ping a cada objetivo)
-        ANTES de llamar a set_label(). En la fase 1, ese set_label vacía
-        las tablas, así que los flujos del warmup nunca llegan a
-        capturarse dentro de la fase de ataque. En la fase 3, al vaciar
-        solo al activar la prueba, esos pings sobrevivían (hasta 5-10 s
-        por los timeouts), se etiquetaban como ataque -el atacante es
-        actor- y el modelo, con razón, los clasificaba como normales:
-        eran el 24% de los flujos de scanning, con un recall de 0.13
-        frente a 0.80 del resto.
-
-        Se compara por (etiqueta, phase_id), como el monitor, para
-        detectar también dos fases consecutivas del mismo tipo."""
+        """Vacía las tablas en cada set_label(), igual que el monitor de la
+        fase 1, para que la fase 3 aísle cada fase como lo hizo el dataset.
+ 
+        Es necesario porque los generadores de scanning y ddos hacen un
+        warmup ARP (pings a los objetivos) antes de set_label(). Sin este
+        vaciado esos flujos sobrevivirían dentro de la fase de ataque y,
+        como el atacante es actor, se etiquetarían como ataque, cuando el
+        modelo los ve como normales.
+ 
+        Se compara por (etiqueta, phase_id) para detectar también dos fases
+        consecutivas del mismo tipo."""
         while True:
             try:
                 with open(config.LABEL_FILE) as f:
@@ -396,6 +387,9 @@ class SDNDefense(app_manager.RyuApp):
             hub.sleep(0.3)
 
     def _handle_transition(self):
+        """Detecta el inicio y el fin de cada prueba (según ACTIVE_FLAG):
+        al empezar vacía las tablas y espera el margen de gracia; al
+        terminar vuelca los eventos, limpia y avisa al orquestador."""
         self._flush_events()
         active = os.path.exists(ACTIVE_FLAG)
         if active == self._was_active:
@@ -479,6 +473,9 @@ class SDNDefense(app_manager.RyuApp):
     # ------------------------------------------------------------------ #
     @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
     def _stats_reply(self, ev):
+        """Por cada sondeo: extrae las características de cada flujo, los
+        clasifica en lote, calcula su etiqueta real, mitiga los que salen
+        como ataque y registra el evento. Solo actúa durante una prueba."""
         self._handle_transition()
         if not self._was_active:
             return
@@ -552,27 +549,25 @@ class SDNDefense(app_manager.RyuApp):
 
     def _mitigate(self, eth_src, eth_dst, now):
         """Decide si bloquear la conversación eth_src -> eth_dst y, si
-        procede, instala el DROP en TODOS los switches. Devuelve True si
-        se ha instalado ahora.
-
-        Por qué por PAR DE MACs y no por IP origen (como antes):
-          - El dataset etiqueta como ataque todo flujo que involucre a un
-            actor, víctimas incluidas (sus respuestas al escáner o al DDoS
-            también son "scanning"/"ddos"). El modelo dice "este flujo
-            pertenece a un ataque", no "este origen es el atacante".
-            Bloquear la IP origen acababa bloqueando a las VÍCTIMAS (en la
-            batería anterior: las 3 víctimas del escaneo y la del DDoS).
-            Bloqueando el par, una respuesta de la víctima solo corta esa
-            respuesta hacia el atacante, que es inofensivo.
-          - En spoofing la IP origen es FALSA: bloquearla dejaba fuera al
-            host inocente suplantado. La MAC origen, en cambio, es la del
-            remitente real (en estos ataques no se falsifica).
+        procede, instala el DROP en todos los switches. Devuelve True si se
+        ha instalado ahora.
+ 
+        Se bloquea por par de MACs, no por IP origen, por varios motivos:
+          - El modelo dice "este flujo pertenece a un ataque", no "este
+            host es el atacante", y el dataset etiqueta como ataque también
+            las respuestas de la víctima. Bloquear la IP origen cortaría a
+            las víctimas; bloquear el par solo corta la respuesta concreta
+            hacia el atacante, que es inofensiva.
+          - En spoofing la IP origen es falsa, así que bloquearla dejaría
+            fuera al host suplantado. La MAC origen es la del remitente
+            real.
           - Un falso positivo corta una conversación, no un host entero.
-          - En todos los switches: bloquear solo en el que reportó el
-            flujo no corta el tráfico que no pasa por él.
-        Confirmación: hace falta que el par se clasifique como ataque en
+          - En todos los switches, porque bloquear solo en el que reportó
+            el flujo no corta el tráfico que no pasa por él.
+ 
+        Solo bloquea si el par se clasifica como ataque en
         MITIGATION_CONFIRMATIONS sondeos distintos dentro de
-        CONFIRM_WINDOW_S (ver la constante)."""
+        CONFIRM_WINDOW_S."""
         if not eth_src or not eth_dst:
             return False
         pair = (eth_src, eth_dst)
@@ -603,10 +598,10 @@ class SDNDefense(app_manager.RyuApp):
         return True
 
     def _log_poll(self, dpid, flow_stats):
-        """Diagnóstico en logs/ryu_defense.log (mismo estilo que el monitor),
-        incluyendo cuántos flujos TCP/UDP traen puertos en el match. Si hay
-        flujos TCP/UDP SIN puertos, avisa una vez: es la pista para el
-        problema de dst_port=-1 visto en la batería anterior."""
+        """Diagnóstico en logs/ryu_defense.log: cuántos flujos ARP/IP/TCP/UDP
+        hay y cuántos TCP/UDP llegan sin puerto en el match. Avisa una vez
+        si los hay, porque un flujo sin puerto altera las características de
+        ventana."""
         n_arp = n_ip = n_tcp = n_udp = n_l4_sin_puerto = 0
         for s in flow_stats:
             m = s.match
@@ -638,19 +633,21 @@ class SDNDefense(app_manager.RyuApp):
     # Extracción de características crudas (MISMO cálculo que el monitor)
     # ------------------------------------------------------------------ #
     def _extract(self, stat, flow_count, dpid, now):
+        """Construye el dict de características crudas de un flujo a partir
+        de sus estadísticas, con el mismo cálculo de contadores y tasas que
+        el monitor. Devuelve None si no es IP ni ARP."""
         m = stat.match
         eth_type = m.get("eth_type")
         if eth_type not in (ether_types.ETH_TYPE_IP, ether_types.ETH_TYPE_ARP):
             return None
         fk = self._flow_key(dpid, m.get)
 
-        # Contadores con la compensación del primer paquete (como el
-        # monitor): se ACUMULA y se mantiene mientras el flujo viva, no
-        # solo en el primer sondeo -si no, el contador acumulado bajaría
-        # (packet_count 1 -> 0) y el cálculo de tasas se iría a la rama de
-        # reinstalación-. Si la duración va hacia atrás, el switch ha
-        # reinstalado el flujo con los contadores a cero y se descarta
-        # tanto la compensación acumulada como la lectura anterior.
+        # Compensación del primer paquete, igual que el monitor: se acumula
+        # y se mantiene mientras el flujo viva; si solo se aplicara en el
+        # primer sondeo, el contador acumulado bajaría después. Si la
+        # duración va hacia atrás, el switch reinstaló el flujo con los
+        # contadores a cero y se descarta la compensación y la lectura
+        # anterior.
         age = stat.duration_sec + stat.duration_nsec / 1e9
         prev = self.prev_stats.get(fk)
         if prev is not None and age + 1e-3 < prev[3]:
@@ -663,12 +660,10 @@ class SDNDefense(app_manager.RyuApp):
         packet_count = stat.packet_count + off_p
         byte_count = stat.byte_count + off_b
 
-        # Tasas: MISMO cálculo que sdn_monitor.py. Antes aquí se indexaba
-        # por (ip_src, ip_dst, eth_src, eth_dst), con lo que flujos
-        # distintos del mismo par (ICMP y TCP, p.ej.) se pisaban entre sí
-        # y salían tasas imposibles (100.000-7.000.000 pkt/s); y un flujo
-        # visto por primera vez tenía tasa 0 en vez de la estimación por
-        # edad que usa el dataset.
+        # Tasas: mismo cálculo que sdn_monitor.py. Se indexa por la clave
+        # de flujo completa para que flujos distintos del mismo par (ICMP y
+        # TCP, p.ej.) no se pisen, y un flujo nuevo estima su tasa por edad
+        # en vez de dar 0, igual que en el dataset.
         if prev is not None and packet_count >= prev[0]:
             dt = max(now - prev[2], 1e-6)
             pps = max((packet_count - prev[0]) / dt, 0)
@@ -712,10 +707,8 @@ class SDNDefense(app_manager.RyuApp):
     # Registro de eventos a CSV (en memoria + volcado por lotes)
     # ------------------------------------------------------------------ #
     def _init_events_csv(self):
-        # Cabecera solo si el archivo no existe: el orquestador "resetea"
-        # las métricas borrando el CSV y aquí se repone. Si existe pero es
-        # de una versión anterior (otras columnas), se empieza de nuevo
-        # para no mezclar formatos en el mismo fichero.
+        # Escribe la cabecera solo si el archivo no existe o tiene otras
+        # columnas (el orquestador resetea las métricas borrando el CSV).
         if os.path.exists(EVENTS_CSV):
             try:
                 with open(EVENTS_CSV) as f:

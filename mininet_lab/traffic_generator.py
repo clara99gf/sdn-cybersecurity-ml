@@ -1,50 +1,24 @@
 #!/usr/bin/env python3
 """
-traffic_generator.py
----------------------
-Orquesta la generación de tráfico dentro de la red Mininet, intercalando
-fases de tráfico normal, scanning, spoofing y ddos en orden aleatorio.
-Antes de cada fase escribe la etiqueta correspondiente en LABEL_FILE,
-que el controlador Ryu (sdn_monitor.py) lee en cada ronda de muestreo
-para etiquetar las filas del CSV.
-
-Cada clase de tráfico tiene, además, VARIANTES internas (distintos
-tipos de escaneo, dos mecanismos de spoofing, intensidades de DDoS
-distintas, patrones de tráfico normal distintos) para que el dataset
-no solo varíe de fase en fase, sino también dentro de cada fase. Y
-ninguna fase puede generar más de MAX_ROWS_PER_PHASE filas (ver
-config.py), para que TARGET_ROWS se reparta entre muchas fases
-distintas en vez de que una sola acapare el dataset.
-
-AMPLIACIÓN DE VARIEDAD (añadida junto con la subida a 150.000 filas en
-config.py, para aprovechar la misma regeneración sin coste de tiempo
-extra):
-  - scanning: añadido "-p 1-30" (rango algo más ancho que "-p 1-20",
-    sigue acotado) y una sonda ACK suelta vía hping3 (no nmap -ver
-    scanning_traffic()-): un paquete TCP con solo el flag ACK activado,
-    firma de tráfico distinta de un SYN normal o de un handshake
-    completo.
-  - ddos: añadida una intensidad intermedia (~1000pps, entre el
-    "flood" máximo y el "rate_limited" original de ~500pps) y puerto
-    objetivo variable (80/443/22/53, antes siempre 80 -un DDoS real no
-    siempre apunta a HTTP-).
-  - spoofing:ip: puerto objetivo variable (80/443/22, mismo motivo).
-  - normal: añadido un ancho de banda "alto" (5M) en iperf_udp, A
-    PROPÓSITO: sin tráfico legítimo de alta tasa en el dataset, el
-    modelo podría aprender el atajo "tasa alta = ataque", que no
-    generalizaría a una transferencia legítima grande de verdad. Con
-    ambos presentes, tiene que aprender la FORMA del tráfico, no solo
-    el volumen -es una recomendación estándar en la literatura de
-    detección de intrusiones: evitar que el modelo dependa de atajos
-    que no reflejan la naturaleza real del ataque-.
-
-Dependencias de red (instaladas mediante setup.sh a nivel de sistema / venv):
-    - Binarios Linux: ping, iperf, nmap, hping3.
-    - Librería Python: scapy.
-
-Ejecución:
-    Este módulo es coordinado automáticamente por el orquestador principal
-    run_01_dataset.py (ver EJECUCION.md).
+mininet_lab/traffic_generator.py
+--------------------------------
+Genera el tráfico de la red Mininet intercalando fases de tráfico
+normal, scanning, spoofing y ddos en orden aleatorio. Antes de cada fase
+escribe su etiqueta en LABEL_FILE, que el controlador (sdn_monitor.py)
+lee en cada sondeo para etiquetar las filas del CSV.
+ 
+Cada clase tiene variantes internas (técnicas de escaneo, ARP e IP
+spoofing, intensidades y vectores de DDoS, patrones de tráfico normal)
+para que el dataset varíe también dentro de cada fase, no solo entre
+fases. El tráfico normal incluye a propósito transferencias de alta tasa
+(iperf a 5M): sin ellas el modelo podría aprender el atajo "tasa alta =
+ataque", que no generaliza a una transferencia legítima grande.
+ 
+Estas mismas funciones las reutiliza la fase 3 (defense/traffic.py), de
+modo que el tráfico que el modelo ve en vivo es idéntico al del dataset.
+ 
+Requiere ping, iperf, nmap, hping3 y scapy (los instala setup.sh). Lo
+coordina run_01_dataset.py; no se ejecuta directamente.
 """
 
 import os
@@ -65,51 +39,32 @@ LOG_FILE = config.TRAFFIC_LOG_FILE
 SETTLE = config.PHASE_SETTLE_SECONDS
 MAX_ROWS_PER_PHASE = config.MAX_ROWS_PER_PHASE
 
-# --------------------------------------------------------------- #
-# Reutilización desde la fase 3 (defense/traffic.py)
-# --------------------------------------------------------------- #
-# La fase de detección y mitigación llama a ESTAS MISMAS funciones de
-# tráfico (normal_traffic, scanning_traffic...) en vez de tener un
-# generador propio: así el tráfico que ve el modelo en vivo es
-# idéntico al del dataset, sin riesgo de que ambos diverjan.
-#
-# ENFORCE_ROW_CAP: en la generación del dataset (True) cada fase se
-# corta al superar MAX_ROWS_PER_PHASE filas del CSV. En la fase 3 no
-# hay CSV del dataset creciendo, y contar sus 300.000 filas cada 0,3s
-# sería un desperdicio -defense/traffic.py lo pone a False-.
-#
-# Además, cada función de fase DEVUELVE sus actores (las mismas IPs que
-# pasa a set_label()). generate_dataset() ignora ese valor; la fase 3
-# lo usa para saber quién atacó a quién.
+# Corte de fase por número de filas. En la generación del dataset (True)
+# cada fase se corta al superar MAX_ROWS_PER_PHASE. La fase 3 lo pone a
+# False: no hay CSV creciendo y contar sus filas en cada comprobación
+# sería un desperdicio.
 ENFORCE_ROW_CAP = True
 
+# Cada función de fase devuelve sus actores (las IPs que pasa a
+# set_label): generate_dataset lo ignora, la fase 3 lo usa para saber
+# quién atacó a quién.
 _phase_counter = 0
 
 
 def set_label(label, actors=None):
-    """Escribe la etiqueta de la fase actual, su identificador y (opcional)
-    los ACTORES del ataque.
-
-    El id es necesario porque el generador elige el tipo de fase al azar,
-    así que salen a menudo VARIAS FASES SEGUIDAS DEL MISMO TIPO (p.ej. 7
-    fases de scanning consecutivas). Deduciendo la fase solo por cambios
-    de etiqueta -como se hacía antes-, todas esas se fusionaban en un
-    único grupo gigante para GroupKFold: menos grupos, mucho más
-    desiguales, y evaluación menos fiable. Con un id explícito, cada
-    llamada a set_label() es una fase distinta aunque repita etiqueta.
-
-    `actors` son las IPs implicadas en el ataque (atacante(s) y
-    víctima(s)). El controlador etiqueta como ATAQUE solo los flujos que
-    involucran a esos hosts, y como "normal" el resto del tráfico que
-    ocurre a la vez -antes se etiquetaba TODO lo que pasara durante la
-    fase, aunque un escaneo lo lance UN host y en esas fases aparezcan
-    ~12 hosts origen distintos: la mayoría de filas eran tráfico de fondo
-    con etiqueta de ataque, ruido puro que impedía separar las clases
-    (medido: F1 0.60 -> 0.70 solo con etiquetar bien)-. Es además el
-    criterio estándar en datasets del área (CICIDS y similares etiquetan
-    por pareja origen/destino del ataque, no por franja horaria).
-
-    Formato: "label,phase_id,ip1|ip2|..."
+    """Escribe la etiqueta de la fase actual, su identificador y, opcional,
+    los actores del ataque. Formato: "label,phase_id,ip1|ip2|...".
+ 
+    El id distingue fases del mismo tipo consecutivas (el tipo se sortea,
+    así que salen varias seguidas). Sin él, la validación cruzada las
+    fusionaría en un solo grupo y perdería fiabilidad al quedarse con
+    pocos grupos y muy desiguales.
+ 
+    `actors` son las IPs del ataque (atacantes y víctimas). El controlador
+    etiqueta como ataque solo los flujos que las involucran, y como normal
+    el tráfico de fondo simultáneo. Es el criterio estándar en datasets
+    del área (CICIDS y similares etiquetan por pareja origen/destino del
+    ataque, no por franja temporal).
     """
     global _phase_counter
     _phase_counter += 1
@@ -147,13 +102,10 @@ def _cap_exceeded(baseline_rows):
 
 
 def _request_flush():
-    """Pide al controlador que vacíe las tablas de flujo AHORA MISMO, sin
-    esperar a un cambio de etiqueta. Necesario porque el generador solo
-    puede detectar que una fase se ha pasado de filas DESPUÉS de que el
-    controlador ya las haya escrito (el CSV solo crece en cada sondeo);
-    y aunque dejemos de lanzar tráfico nuevo en cuanto lo detectamos, los
-    flujos YA CREADOS seguirían vivos hasta su hard_timeout, sumando más
-    filas de la cuenta mientras tanto si no se vacían de inmediato."""
+    """Pide al controlador que vacíe las tablas de flujo ahora, sin esperar
+    a un cambio de etiqueta. Al cortar una fase por exceso de filas, dejar
+    de lanzar tráfico no basta: los flujos ya instalados seguirían vivos
+    hasta su hard_timeout, sumando filas de más mientras tanto."""
     try:
         with open(config.FLUSH_REQUEST_FILE, "w") as f:
             f.write(str(time.time()))
@@ -162,12 +114,9 @@ def _request_flush():
 
 
 def _sleep_with_cap(duration, baseline_rows, phase_name, step=0.3):
-    """
-    Sustituye la espera pasiva (time.sleep) dividiéndola en intervalos breves (step=0.3s).
-
-    En cada ciclo verifica si se ha excedido el máximo de filas de la fase. Si se alcanza
-    el tope, solicita el vaciado inmediato de flujos y aborta la fase de forma anticipada.
-    """
+    """Espera 'duration' segundos en tramos cortos, comprobando en cada uno
+    si la fase ha superado su tope de filas. Si lo supera, pide el vaciado
+    de flujos y devuelve True para cortar la fase antes de tiempo."""
     elapsed = 0.0
     while elapsed < duration:
         chunk = min(step, duration - elapsed)
@@ -185,14 +134,9 @@ def _sleep_with_cap(duration, baseline_rows, phase_name, step=0.3):
 # Lanzar/matar procesos en segundo plano por PID exacto
 # ------------------------------------------------------------------ #
 def _start_bg(host, cmd):
-    """
-    Ejecuta un comando en segundo plano en la shell del host y recupera su PID exacto.
-    Redirige STDOUT y STDERR hacia el archivo de log global, AÑADIENDO
-    (append, ">>") en vez de sobrescribiendo -bug corregido: con ">" cada
-    llamada borraba todo el log anterior y lo sustituía por la salida de
-    ESE comando concreto, dejando solo lo último que se hubiera lanzado
-    al terminar toda una tirada, en vez del histórico completo-.
-    """
+    """Lanza un comando en segundo plano en la shell del host y devuelve su
+    PID, para poder matarlo luego de forma precisa. La salida se añade
+    (>>) al log global, no lo sobrescribe."""
     host.cmd(f"{cmd} >> {LOG_FILE} 2>&1 &")
     pid = host.cmd("echo $!").strip()
     return pid
@@ -205,29 +149,22 @@ def _kill_pid(host, pid):
 
 
 def _kill_all_attack_tools():
-    """Red de seguridad ADICIONAL:
-    mata cualquier proceso de las herramientas de tráfico que pudiera
-    haber quedado vivo pese al kill por PID. Se llama al empezar CADA fase."""
+    """Mata cualquier herramienta de tráfico que siguiera viva pese al kill
+    por PID. Se llama al empezar cada fase, como red de seguridad."""
     for proc in ("hping3", "nmap", "arp_spoof.py", "iperf", "ping"):
         os.system(f"pkill -9 -f {proc} 2>/dev/null")
 
 
 def _arp_warmup(net, attacker, targets):
-    """
-    Fuerza la resolución ARP previa entre el host atacante y los objetivos.
-
-    Asegura que el tráfico de descubrimiento ARP (legítimo) se registre antes de
-    que se active la etiqueta de ataque en el controlador SDN.
-    """
+    """Resuelve por ARP las direcciones de los objetivos antes de etiquetar
+    la fase, para que ese tráfico ARP legítimo no cuente como ataque."""
     for t in targets:
         attacker.cmd(f"ping -c 1 -W 1 {t.IP()} > /dev/null 2>&1")
 
 
 def check_required_tools(net):
-    """
-    Verifica que las herramientas de sistema y librerías de Python requeridas
-    estén estén disponibles desde los hosts virtuales de Mininet.
-    """
+    """"Comprueba que las herramientas de sistema y scapy están disponibles
+    desde los hosts de Mininet, y avisa de las que falten."""
     tools = ["ping", "nmap", "hping3", "iperf"]
     h = net.hosts[0]
     missing = [t for t in tools if not h.cmd(f"which {t}").strip()]
@@ -280,11 +217,8 @@ def normal_traffic(net, duration):
             h1.cmd(f"iperf -c {h2.IP()} -p 5002 -t {t} >> {LOG_FILE} 2>&1")
 
         else:  # iperf_udp
-            # Incluye un ancho de banda "alto" (5M) a propósito: sin esto,
-            # el modelo podría aprender el atajo "tasa alta = ataque" -que
-            # no generalizaría bien a una transferencia legítima grande de
-            # verdad-. Con tráfico normal de alta tasa también presente,
-            # tiene que aprender la FORMA del ataque, no solo el volumen.
+            # El ancho de banda alto (5M) está a propósito: así el modelo
+            # no aprende el atajo "tasa alta = ataque" (ver docstring).
             bw = random.choice(["200K", "500K", "1M", "5M"])
             if h2.name not in started_udp_servers:
                 h2.cmd(f"iperf -s -u -p 5001 >> {LOG_FILE} 2>&1 &")
@@ -307,30 +241,21 @@ def normal_traffic(net, duration):
 # Fase: scanning
 # ------------------------------------------------------------------ #
 def scanning_traffic(net, duration):
-    """
-    Simula escaneos de puertos/red hacia hosts objetivo, combinando nmap
-    (varias técnicas y velocidades, elegidas al azar) con sondas ACK
-    sueltas vía hping3 -equivalente al escaneo ACK, ver más abajo-.
-    Aplica -Pn en nmap para evitar el descubrimiento de hosts mediante
-    ICMP.
-    """
+    """Escaneo de puertos y red hacia hosts objetivo, combinando nmap (con
+    técnicas y velocidades al azar) y sondas ACK sueltas vía hping3. nmap
+    lleva -Pn para no hacer descubrimiento previo por ICMP."""
     hosts = net.hosts
     attacker = random.choice(hosts)
     targets = [h for h in hosts if h != attacker]
     _kill_all_attack_tools()
     _arp_warmup(net, attacker, targets)
 
-    # SOLO el atacante como actor, NO los objetivos. Un escaneo apunta a
-    # (casi) todos los hosts, así que si se incluyeran los objetivos como
-    # actores, el etiquetado por flujo marcaría como "scanning" cualquier
-    # flujo dirigido a cualquier host -es decir, TODO el tráfico de fondo-
-    # y no filtraría nada (bug detectado: en las fases de scanning
-    # aparecían los 16 hosts como origen, con ~1400 filas ARP de fondo
-    # etiquetadas como ataque). Un flujo es scanning si lo ORIGINA el
-    # atacante; el tráfico hacia una víctima que NO viene del atacante es
-    # fondo, y debe quedar como normal. _label_for_flow comprueba tanto
-    # origen como destino, así que con el atacante basta para capturar
-    # sus sondas (él es el origen) y sus respuestas (él es el destino).
+    # Solo el atacante como actor, no los objetivos: un escaneo apunta a
+    # casi todos los hosts, así que incluir los objetivos etiquetaría como
+    # scanning todo el tráfico de fondo hacia cualquier host. Un flujo es
+    # scanning si lo origina el atacante; como el controlador comprueba
+    # origen y destino, con el atacante basta para capturar sus sondas y
+    # las respuestas que recibe.
     actors = [attacker.IP()]
     set_label("scanning", actors=actors)
     baseline = _count_csv_rows()
@@ -339,31 +264,20 @@ def scanning_traffic(net, duration):
     scan_types = [
         "-sS", "-sT", "-sU --top-ports 8", "-p 1-20", "-p 1-30",
     ]
-    timing = ["-T2", "-T3", "-T4"]  # sin -T5: demasiado explosivo con rangos de puertos
+    timing = ["-T2", "-T3", "-T4"]  # sin -T5: demasiado agresivo con rangos de puertos
 
-    # Probabilidad de la variante "sonda ACK" frente a nmap: 1 entre 6
-    # (mismo peso relativo que si fuera una entrada más de scan_types,
-    # para no descompensar la mezcla de variantes).
+    # La sonda ACK pesa como una variante más entre las de nmap.
     ACK_PROBE_PROBABILITY = 1 / 6
 
     while time.time() < end_time and not _cap_exceeded(baseline):
         target = random.choice(targets)
         if random.random() < ACK_PROBE_PROBABILITY:
-            # Sonda ACK vía hping3 (no nmap): paquetes TCP con SOLO el
-            # flag ACK activado, sin conexión previa -firma de tráfico
-            # distinta de un SYN normal (ddos/spoofing) o de un
-            # handshake completo (normal)-. Mismo mecanismo de puerto
-            # origen fijo (-k -s) que ya usamos en ddos/spoofing para
-            # evitar un flujo nuevo por paquete.
-            #
-            # -c 5 -i u200000 (5 paquetes, 1 cada 0.2s) en vez de "-c 1":
-            # con un único paquete el flujo vivía milisegundos y casi
-            # nunca sobrevivía hasta el siguiente sondeo del controlador
-            # -era señal generada pero NO capturada, justo el cuello de
-            # botella que limita la separación entre clases-. Con ~1s de
-            # actividad, el flujo cruza al menos un sondeo
-            # (POLL_INTERVAL=1s) y llega al CSV, sin dejar de ser una
-            # sonda ligera.
+            # Sonda ACK: paquetes TCP con solo el flag ACK, una firma
+            # distinta del SYN (ddos/spoofing) y del handshake completo
+            # (normal). Puerto origen fijo (-k -s) para no crear un flujo
+            # por paquete. Se envían 5 paquetes durante ~1s (-c 5 -i
+            # u200000) para que el flujo sobreviva al menos a un sondeo
+            # (POLL_INTERVAL=1s) y llegue al CSV.
             port = random.randint(1, 30)
             _log(f"[scanning] {attacker.name} -> {target.IP()} :: hping3 -A -p {port}")
             pid = _start_bg(
@@ -390,24 +304,17 @@ def scanning_traffic(net, duration):
 # Fase: spoofing (dos mecanismos: ARP spoofing e IP spoofing)
 # ------------------------------------------------------------------ #
 def spoofing_traffic(net, duration):
-    """Elige aleatoriamente entre ARP spoofing (envenenamiento de caché ARP)
-    e IP spoofing (paquetes TCP con IP origen falsificada vía hping3).
-
-    Los actores se eligen AQUÍ (antes de set_label) para poder pasárselos
-    al controlador y que etiquete solo los flujos del ataque -ver
-    set_label()-.
-    """
+    """Elige al azar entre ARP spoofing (envenenamiento de caché ARP) e IP
+    spoofing (TCP con IP origen falsificada vía hping3). Los actores se
+    eligen antes de set_label para poder pasárselos al controlador."""
     _kill_all_attack_tools()
     hosts = net.hosts
     attacker = random.choice(hosts)
     others = [h for h in hosts if h != attacker]
     variant = random.choice(["arp", "ip"])
     if variant == "arp":
-        # ARP spoofing MULTI-VÍCTIMA: 2-4 víctimas + 1 identidad
-        # suplantada. Un ARP spoofing real rara vez ataca a un solo
-        # host; envenenar a varios a la vez es más realista y, sobre
-        # todo, genera bastantes más flujos capturables -antes una fase
-        # de spoofing dejaba apenas 1-3 flujos en toda la red-.
+        # ARP spoofing multi-víctima: 2-4 víctimas y 1 identidad
+        # suplantada, como en un ataque real.
         n_victims = random.randint(2, 4)
         picked = random.sample(others, n_victims + 1)
         victims = picked[:n_victims]
@@ -427,6 +334,8 @@ def spoofing_traffic(net, duration):
 
 
 def _arp_spoofing(net, duration, baseline, attacker, victims, impersonated):
+    """Lanza arp_spoof.py: envenena la caché ARP de las víctimas para que
+    'impersonated' apunte a la MAC del atacante."""
     victim_ips = " ".join(v.IP() for v in victims)
     _log(f"[spoofing:arp] {attacker.name} suplanta {impersonated.IP()} ante "
          f"{[v.name for v in victims]}")
@@ -441,11 +350,8 @@ def _arp_spoofing(net, duration, baseline, attacker, victims, impersonated):
 
 def _ip_spoofing(net, duration, baseline, attacker, victim, fake_source):
     """El atacante envía TCP a 'victim' falsificando la IP origen como si
-    fuera 'fake_source'.
-    Puerto origen fijo (-k -s) para no generar un flujo nuevo por paquete.
-    Puerto DESTINO variable (antes siempre 80): varios servicios reales
-    detrás de spoofing, no solo HTTP -más variedad, mismo mecanismo de
-    puerto origen fijo que evita la explosión de flujos-."""
+    fuera 'fake_source'. Puerto origen fijo (-k -s) para no crear un flujo
+    por paquete, y puerto destino variable para cubrir varios servicios."""
     target_port = random.choice([80, 443, 22])
 
     _log(f"[spoofing:ip] {attacker.name} -> {victim.IP()}:{target_port} con IP falsa {fake_source.IP()}")
@@ -462,14 +368,10 @@ def _ip_spoofing(net, duration, baseline, attacker, victim, fake_source):
 # Fase: ddos
 # ------------------------------------------------------------------ #
 def ddos_traffic(net, duration, allow_flood=True):
-    """
-    Ejecuta ataques de denegación de servicio distribuidos usando múltiples atacantes.
-    Alterna vectores de ataque (SYN, UDP, ICMP) e intensidades (flood o tasa limitada).
-
-    allow_flood=False excluye la intensidad "--flood" (la usa la fase 3:
-    con el modelo clasificando en vivo, el flood total satura la CPU y
-    cuelga Mininet). La generación del dataset la deja en True.
-    """
+    """DDoS con varios atacantes contra una víctima, alternando vector
+    (SYN, UDP, ICMP) e intensidad. allow_flood=False excluye la intensidad
+    "--flood", que la fase 3 no usa porque satura el entorno de emulación
+    (ver config.DEFENSE_DDOS_ALLOW_FLOOD); la fase 1 la deja en True."""
     hosts = net.hosts
     victim = random.choice(hosts)
     attackers = [h for h in hosts if h != victim]
@@ -483,9 +385,8 @@ def ddos_traffic(net, duration, allow_flood=True):
     baseline = _count_csv_rows()
 
     flood_type = random.choice(["--syn", "--udp", "--icmp"])
-    # Tres intensidades en vez de dos: un punto intermedio entre el
-    # "flood" máximo y el "rate_limited" original (~500pps), para que
-    # el espectro de intensidad no sean solo dos extremos.
+    # Dos tasas limitadas (~500 y ~1000 pps) más el flood, para cubrir un
+    # rango de intensidad y no solo los dos extremos.
     intensities = ["rate_limited", "rate_limited_fast"]
     if allow_flood:
         intensities.insert(0, "flood")
@@ -495,8 +396,7 @@ def ddos_traffic(net, duration, allow_flood=True):
         "rate_limited": "-i u2000",       # ~500 pps
         "rate_limited_fast": "-i u1000",  # ~1000 pps
     }[intensity]
-    # Puerto objetivo variable (antes siempre 80): un DDoS real no
-    # siempre apunta a HTTP -más variedad de servicios objetivo-.
+    # Puerto objetivo variable: un DDoS real no siempre apunta a HTTP.
     target_port = random.choice([80, 443, 22, 53])
 
     _log(f"[ddos] {[a.name for a in chosen_attackers]} -> {victim.IP()}:{target_port} "
@@ -522,25 +422,16 @@ def ddos_traffic(net, duration, allow_flood=True):
 # Orquestador principal
 # ------------------------------------------------------------------ #
 def generate_dataset(net, total_duration=None, min_phase=None, max_phase=None, target_rows=None):
-    """
-    Coordina la secuencia global de fases de tráfico.
-
-    El proceso finaliza al alcanzar la meta de registros ('target_rows')
-    o al cumplirse el tiempo límite ('total_duration').
-    """
+    """Ejecuta fases de tráfico de tipo aleatorio hasta alcanzar target_rows
+    filas o agotar total_duration segundos."""
     total_duration = total_duration or config.TOTAL_DURATION
     min_phase = min_phase or config.MIN_PHASE_DURATION
     max_phase = max_phase or config.MAX_PHASE_DURATION
     target_rows = config.TARGET_ROWS if target_rows is None else target_rows
 
-    # Empezar cada tirada con el log de tráfico limpio. _log() escribe
-    # con "a" (añadir) a propósito, para no perder nada DENTRO de una
-    # misma tirada -pero eso significa que, sin este borrado, se
-    # acumularía entre tiradas distintas indefinidamente (nos pasó: un
-    # archivo de más de un millón de líneas mezclando varias tiradas).
-    # ryu_controller.log no necesita este mismo tratamiento aquí:
-    # run_01_dataset.py ya lo abre en modo "escribir" (sobrescribe) en
-    # cada ejecución, por su cuenta.
+    # Empezar cada tirada con el log limpio: _log() añade (modo "a") para
+    # no perder nada dentro de una tirada, así que sin este borrado se
+    # acumularían varias tiradas en el mismo fichero.
     open(LOG_FILE, "w").close()
 
     check_required_tools(net)
