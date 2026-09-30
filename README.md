@@ -1,4 +1,4 @@
-# Detección y mitigación de amenazas en SDN con Machine Learning 
+# Tecnologías SDN e Inteligencia Artificial como Mecanismos de Mitigación de Incidentes de Ciberseguridad
 
 Sistema que combina Redes Definidas por Software (SDN) e Inteligencia
 Artificial para detectar y mitigar en tiempo real ataques de **scanning**,
@@ -40,18 +40,15 @@ Los resultados completos se encuentran en `results/` y el análisis detallado
 en la memoria del TFG, en `docs/`.
 
 ### Fase 1: el dataset
-
 Se obtuvieron **293.852 flujos útiles**, distribuidos en **909 fases de
 tráfico**, correspondientes a tráfico normal, scanning, DDoS y spoofing.
 
 ### Fase 2: evaluación offline
-
 La evaluación mediante `GroupKFold` de 5 particiones, agrupando por fase,
 seleccionó **Random Forest** como modelo con mejor rendimiento, con un
 **F1 macro de 0,753 ± 0,020**.
 
 ### Fase 3: detección y mitigación en vivo
-
 En 10 ejecuciones de la batería completa, la detección obtuvo un
 **F1 macro de 0,814 ± 0,078**.
 
