@@ -96,7 +96,10 @@ def main():
         info("\n*** Interrumpido por el usuario.\n")
     finally:
         info("*** Deteniendo la red...\n")
-        net.stop()
+        try:
+            net.stop()
+        except AssertionError as e:
+            info(f"*** Aviso: fallo no crítico al limpiar Mininet ({e}).\n")
         info("*** [topology.py] Limpiando estado residual de Mininet (mn -c)...\n")
         subprocess.run(["mn", "-c"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
