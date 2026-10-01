@@ -17,7 +17,7 @@ setup(
     version="1.0.0",
     description=(
         "Generacion de dataset de trafico SDN (normal/scanning/spoofing/ddos) "
-        "con Mininet y Ryu, mas preprocesado/entrenamiento/evaluacion de "
+        "con Mininet y Ryu, mas preprocesado/entrenamiento/evaluación de "
         "modelos de Machine Learning (Logistic Regression, Decision Tree, "
         "Random Forest) para detección de amenazas."
     ),
@@ -27,10 +27,11 @@ setup(
                  "ml", "ml.*", "defense", "defense.*"]
     ),
     install_requires=[
-        # Generación del dataset (Mininet/Ryu). eventlet se fija porque
-        # las versiones recientes rompen Ryu (setup.sh aplica además un
-        # parche a ryu/app/wsgi.py por el mismo motivo).
-        "ryu",
+        # Generación del dataset (Mininet/Ryu). ryu se fija a 4.34 (su
+        # última versión) y eventlet a <0.36 porque las combinaciones más
+        # nuevas rompen Ryu; setup.sh, además, instala Ryu con una
+        # setuptools antigua y parchea ryu/app/wsgi.py por el mismo motivo.
+        "ryu==4.34",
         "eventlet<0.36",
         "scapy",
         # Preprocesado / entrenamiento / evaluación (ml/)

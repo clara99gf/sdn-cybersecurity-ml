@@ -13,13 +13,15 @@ El proyecto se divide en tres fases:
 | 2. Machine Learning | `ml/run_02_ml.py` | Preprocesa, entrena Logistic Regression, Decision Tree y Random Forest, y los evalúa con validación cruzada agrupada por fase | `models/`, `results/` |
 | 3. Detección y mitigación | `run_03_defense.py` | El controlador clasifica cada flujo en vivo con el mejor modelo y bloquea las conversaciones de ataque con reglas OpenFlow DROP | `results/events/`, `results/figures/defense/`, `results/tables/` |
 
-- **Instalación**: `./setup.sh` (Ubuntu, Python 3.8-3.10; instala
-  Mininet, Open vSwitch, nmap, hping3, iperf y crea el entorno virtual
-  con Ryu, scapy y scikit-learn, aplicando el parche de compatibilidad
-  que Ryu necesita con eventlet). `requirements.txt` documenta las
-  versiones exactas con las que se obtuvieron estos resultados: para
-  replicarlas, `./venv/bin/pip install -r requirements.txt` después de
-  `setup.sh`.
+- **Instalación**: `./setup.sh` sobre Ubuntu, partiendo de una máquina
+  limpia. Instala los paquetes de sistema (Mininet, Open vSwitch, nmap,
+  hping3, iperf), un Python 3.10 si el sistema no trae uno compatible
+  (Ryu solo funciona con 3.8-3.10), y un entorno virtual aislado con las
+  dependencias Python, aplicando el parche que Ryu necesita con eventlet.
+  Por defecto fija las versiones exactas de `requirements.txt` (el
+  entorno del TFG); con `PINNED=0 ./setup.sh` usa los rangos de
+  `setup.py`, para comprobar que el proyecto sigue funcionando con
+  versiones nuevas.
 - **Ejecución paso a paso**: [`EJECUCION.md`](EJECUCION.md).
 - **Parámetros**: todos centralizados en `config.py`, con una sección por fase.
 
@@ -112,8 +114,10 @@ legítimas.
 - **Coste de los falsos positivos.** Aunque en flujos son pocos (24 de
   4.065, un 0,6 %), medidos por conversación son 2,4 de las 12,4 activas
   en cada prueba de tráfico normal: alrededor de una de cada cinco
-  conversaciones legítimas sufre un corte de 20 s en algún momento. Reducirlo más podría requerir subir el umbral de confirmación o requerir la confirmación en varios
-  switches, a costa de retrasar la respuesta ante un ataque real.
+  conversaciones legítimas sufre un corte de 20 s en algún momento. Reducirlo 
+  más podría requerir subir el umbral de confirmación o requerir 
+  la confirmación en varios switches, a costa de retrasar la respuesta
+  ante un ataque real.
 - **El recall de mitigación mide cobertura, no supresión continua**: una
   conversación cuenta como bloqueada si se le aplicó un DROP en algún
   momento. Como las reglas duran 20 s, un ataque prolongado se bloquea,

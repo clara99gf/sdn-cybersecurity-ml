@@ -174,16 +174,14 @@ def _start_controller():
 
 
 def _ryu_command():
-    """Comando para lanzar Ryu utilizando el Python del entorno virtual.
-
-    El controlador de defensa necesita, además de Ryu, dependencias como
-    pandas, scikit-learn y joblib. Por ello, Ryu se ejecuta mediante el
-    Python del venv, que tiene acceso a las dependencias instaladas en él
-    y, gracias a --system-site-packages, también a los paquetes de Python
-    instalados a nivel de sistema.
-
-    Si no existe el venv, se intenta utilizar el ryu-manager disponible
-    en el sistema como último recurso.
+    """Comando para lanzar ryu-manager con acceso a las dependencias del
+    venv (pandas, scikit-learn, joblib) que el controlador necesita para
+    cargar el modelo.
+ 
+    Se ejecuta a través del Python del venv (venv/bin/python3 -m
+    ryu.cmd.manager) en lugar del ejecutable 'ryu-manager' a secas, para
+    garantizar que use el intérprete del venv y vea tanto Ryu como el
+    resto de dependencias. Si no hay venv, cae al ryu-manager del PATH.
     """
     venv_py = os.path.join(config.PROJECT_ROOT, "venv", "bin", "python3")
     if os.path.exists(venv_py):
