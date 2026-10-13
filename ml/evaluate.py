@@ -12,7 +12,7 @@ split aleatorio por fila dejaría filas casi gemelas a los dos lados, y el
 modelo "reconocería" en test fragmentos que ya vio en train, inflando el
 F1 sin medir generalización real. Se usan varias particiones, y no un
 único split, porque un solo split agrupado es muy inestable según qué
-fases caigan en test; promediar varias da una estimación más estable.
+fases caigan en test; reunir las predicciones de varias da una estimación más estable.
  
 El escalado y la selección de características se hacen dentro de cada
 fold, ajustados solo con su parte de entrenamiento, para que la fuga de
@@ -23,7 +23,8 @@ modelos (el mejor se elige por F1 macro), una matriz de confusión por
 modelo (con predicciones out-of-fold, cada fila predicha por un modelo
 que no vio su fase), y la tabla de coste computacional (entrenamiento e
 inferencia). Precision/recall/F1 se promedian en "macro", para que todas
-las clases pesen igual.
+las clases pesen igual. Las métricas se calculan sobre las predicciones de todas
+las particiones reunidas; la desviación es la de los F1 macro de cada partición.
 """
 import os
 import sys
@@ -86,7 +87,7 @@ def cross_validate_model(model_ctor, X, y, groups, n_splits=N_CV_FOLDS):
     """GroupKFold: entrena y evalúa el modelo en n_splits particiones,
     sin que ninguna fase quede repartida entre train y test dentro de
     un mismo fold. Devuelve las predicciones "out-of-fold" (cada fila
-    predicha exactamente una vez) y las métricas por fold."""
+    predicha exactamente una vez) y el F1 macro de cada fold."""
     gkf = GroupKFold(n_splits=n_splits)
     oof_pred = np.full(len(y), -1)
     per_fold_metrics = []
@@ -141,7 +142,7 @@ def plot_metrics_bar(metrics_df, out_path):
     ax = metrics_df.set_index("model")[["accuracy", "precision", "recall", "f1"]].plot(
         kind="bar", figsize=(9, 5), rot=0,
     )
-    ax.set_ylabel("Puntuación (media GroupKFold)")
+    ax.set_ylabel("Puntuación (predicciones reunidas, GroupKFold)")
     ax.set_title("Comparativa de métricas por modelo (validación cruzada agrupada por fase)")
     ax.set_ylim(0, max(1.0, metrics_df[["accuracy", "precision", "recall", "f1"]].values.max() * 1.1))
     ax.legend(loc="lower right")
@@ -230,7 +231,7 @@ def main():
             cm, class_names, display_name,
             os.path.join(config.FIGURES_DIR, f"confusion_matrix_{key}.png"),
         )
-        print(f"[evaluate] {display_name}: F1 medio={metrics['f1']:.4f} "
+        print(f"[evaluate] {display_name}: F1 macro={metrics['f1']:.4f} "
               f"(±{metrics['f1_std_entre_folds']:.4f} entre folds)\n")
 
     metrics_df = pd.DataFrame(rows)
@@ -250,11 +251,11 @@ def main():
     best_model = load_artifact(f"{best_key}.pkl")
     save_artifact(best_model, "best_model.pkl")
 
-    print(f"\n[evaluate] Mejor modelo según F1-score medio (GroupKFold, macro): "
+    print(f"\n[evaluate] Mejor modelo según F1-score macro (GroupKFold): "
           f"{best_row['model']} (F1={best_row['f1']:.4f} ± {best_row['f1_std_entre_folds']:.4f}) "
           f"-> guardado como models/best_model.pkl")
 
-    print("\n=== Tabla de métricas (media entre folds) ===")
+    print("\n=== Tabla de métricas (sobre las predicciones de las 5 particiones reunidas) ===")
     print(metrics_df.to_string(index=False))
     print("\n=== Tabla de coste computacional ===")
     print(cost_df.to_string(index=False))

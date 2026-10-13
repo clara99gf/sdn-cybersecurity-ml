@@ -1,7 +1,7 @@
 # Tecnologías SDN e Inteligencia Artificial como Mecanismos de Mitigación de Incidentes de Ciberseguridad
 
 Sistema que combina Redes Definidas por Software (SDN) e Inteligencia
-Artificial para detectar y mitigar en tiempo real ataques de **scanning**,
+Artificial para detectar y mitigar en vivo ataques de **scanning**,
 **spoofing** (ARP e IP) y **DDoS** en una red emulada con Mininet y
 controlada por Ryu (OpenFlow 1.3).
 
@@ -48,11 +48,13 @@ tráfico**, correspondientes a tráfico normal, scanning, DDoS y spoofing.
 ### Fase 2: evaluación offline
 La evaluación mediante `GroupKFold` de 5 particiones, agrupando por fase,
 seleccionó **Random Forest** como modelo con mejor rendimiento, con un
-**F1 macro de 0,753 ± 0,020**.
+**F1 macro de 0,753**, calculado sobre las predicciones de las 5 particiones
+reunidas (± 0,020, desviación típica de los F1 macro de cada partición).
 
 ### Fase 3: detección y mitigación en vivo
 En 10 ejecuciones de la batería completa, la detección obtuvo un
-**F1 macro de 0,814 ± 0,078**.
+**F1 macro de 0,814 ± 0,078** (media ± desviación típica poblacional de las
+10 ejecuciones).
 
 A nivel de mitigación, se bloquearon **387 de 397 conversaciones de ataque
 (recall 0,975)**. Se produjeron además 24 bloqueos de conversaciones
@@ -111,12 +113,11 @@ legítimas.
 - **Detección por volumen.** El modelo identifica el DDoS principalmente
   por su tasa de paquetes, así que un ataque lento y sostenido, por
   debajo de esa tasa, podría pasar desapercibido.
-- **Coste de los falsos positivos.** Aunque en flujos son pocos (24 de
-  4.065, un 0,6 %), medidos por conversación son 2,4 de las 12,4 activas
-  en cada prueba de tráfico normal: alrededor de una de cada cinco
-  conversaciones legítimas sufre un corte de 20 s en algún momento. Reducirlo 
-  más podría requerir subir el umbral de confirmación o requerir 
-  la confirmación en varios switches, a costa de retrasar la respuesta
+- **Coste de los falsos positivos.** Medidos por conversación, 24 de las 124
+  conversaciones legítimas observadas en las pruebas de tráfico normal se
+  bloquearon por error (19,4 %): alrededor de una de cada cinco sufre un corte
+  de 20 s. Reducirlo más podría requerir subir el umbral de confirmación o
+  exigir la confirmación en varios switches, a costa de retrasar la respuesta
   ante un ataque real.
 - **El recall de mitigación mide cobertura, no supresión continua**: una
   conversación cuenta como bloqueada si se le aplicó un DROP en algún
