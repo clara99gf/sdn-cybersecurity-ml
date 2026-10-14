@@ -22,7 +22,7 @@ sudo venv/bin/python3 run_01_dataset.py
 Arranca el controlador Ryu (`controller/sdn_monitor.py`), levanta la
 topología, genera fases de tráfico aleatorias hasta alcanzar
 `TARGET_ROWS` (300.000 filas, contadas las de transición entre fases que
-luego se descartan; unas 4 horas) y al terminar, o con
+luego se descartan; unas 6 horas) y al terminar, o con
 `Ctrl+C`, detiene el controlador y limpia Mininet. Si el controlador no
 arranca, muestra en la terminal las últimas líneas de su log.
 

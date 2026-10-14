@@ -42,23 +42,25 @@ Los resultados completos se encuentran en `results/` y el análisis detallado
 en la memoria del TFG, en `docs/`.
 
 ### Fase 1: el dataset
-Se obtuvieron **293.852 flujos útiles**, distribuidos en **909 fases de
-tráfico**, correspondientes a tráfico normal, scanning, DDoS y spoofing.
+Se obtuvieron **254.283 flujos útiles**, distribuidos en **904 fases de
+tráfico**, correspondientes a tráfico normal, scanning, DDoS y spoofing
+(las filas de transición entre fases se descartan).
 
 ### Fase 2: evaluación offline
 La evaluación mediante `GroupKFold` de 5 particiones, agrupando por fase,
 seleccionó **Random Forest** como modelo con mejor rendimiento, con un
-**F1 macro de 0,753**, calculado sobre las predicciones de las 5 particiones
-reunidas (± 0,020, desviación típica de los F1 macro de cada partición).
+**F1 macro de 0,826**, calculado sobre las predicciones de las 5 particiones
+reunidas (± 0,016, desviación típica de los F1 macro de cada partición).
 
 ### Fase 3: detección y mitigación en vivo
 En 10 ejecuciones de la batería completa, la detección obtuvo un
-**F1 macro de 0,814 ± 0,078** (media ± desviación típica poblacional de las
-10 ejecuciones).
+**F1 macro de 0,756 ± 0,059** por flujo (media ± desviación típica
+poblacional de las 10 ejecuciones).
 
-A nivel de mitigación, se bloquearon **387 de 397 conversaciones de ataque
-(recall 0,975)**. Se produjeron además 24 bloqueos de conversaciones
-legítimas.
+A nivel de mitigación, se bloquearon **390 de 395 conversaciones de ataque
+(recall 0,987)**, con el primer bloqueo unos 2 s después del primer flujo
+del ataque. Se bloquearon además 28 conversaciones legítimas, todas en las
+pruebas de tráfico normal.
 
 ## Decisiones de diseño principales
 
@@ -86,27 +88,36 @@ legítimas.
 
 ## Limitaciones conocidas
 
+- **El entorno de emulación se satura en momentos puntuales.** Mininet y
+  Ryu comparten una única máquina. En la generación del dataset, 42 de las
+  675 fases de ataque (6,2 %) no registraron ningún flujo de su clase,
+  con tramos de hasta 21 s sin filas, sobre todo tras un DDoS sin límite
+  de tasa. Las etiquetas no se ven afectadas, pero se pierden muestras de
+  ataque.
 - **Dos generaciones del dataset, no una muestra amplia.** La generación
   es estocástica (se sortean tipos de fase, variantes de ataque y hosts
-  atacantes). Con dos generaciones se puede decir que la diferencia
-  observada es pequeña (0,726 frente a 0,753), pero no estimar una
-  dispersión con rigor: para eso harían falta varias tiradas más, de unas
-  cuatro horas cada una, y queda fuera del alcance de este trabajo.
+  atacantes). Se generaron dos con la misma configuración, y el F1 macro
+  de Random Forest fue de 0,826 y 0,779. La segunda muestra más signos de
+  saturación (flujos DDoS registrados a mucha menor tasa) y el modelo
+  desplegado se entrena con la primera. Con dos generaciones no se puede
+  estimar una dispersión con rigor: para eso harían falta varias tiradas
+  más, de unas seis horas cada una.
 - **La batería de la fase 3 también es estocástica.** Cada ejecución
   sortea atacantes, víctimas y variantes de cada ataque, y el F1 macro
-  por ejecución varía entre 0,672 y 0,927 dentro de una misma batería
+  por ejecución varía entre 0,667 y 0,828 dentro de una misma batería
   (`defense_battery_runs.csv`). Por eso las cifras se dan siempre con su
   dispersión entre ejecuciones, y una ejecución aislada no debe tomarse
   como representativa.
 - **La mitigación sesga el recall por flujo.** Una vez instalada la
   regla DROP el ataque queda cortado, y lo que el controlador sigue
   viendo son reglas reactivas anteriores que expiran sin tráfico (las
-  reglas DROP en sí se excluyen del procesamiento). Además, cuando la
-  regla caduca y el ataque rebrota, se le vuelve a cortar enseguida. En
-  el DDoS, el recall por flujo (0,685) queda por debajo del que tiene
-  hasta el primer bloqueo (0,774, `defense_recall_around_drop.csv`),
-  mientras que en el scanning sube tras el bloqueo: el efecto no tiene
-  el mismo signo en todas las clases.
+  reglas DROP en sí se excluyen del procesamiento). En el DDoS, el recall
+  por flujo es de 0,986 hasta el primer bloqueo y de 0,410 después
+  (`defense_recall_around_drop.csv`), porque la mayoría de los flujos
+  posteriores no llevan tráfico y el modelo los clasifica como normales;
+  las 62 conversaciones de DDoS se bloquearon. En el scanning, en cambio,
+  el recall sube tras el bloqueo: el efecto no tiene el mismo signo en
+  todas las clases.
 - **La detección en vivo no es independiente de la política de
   mitigación.** Cuanto antes se bloquee una conversación, menos flujos
   de ese ataque llega a observar el controlador, y esos flujos son
@@ -173,7 +184,7 @@ logs/, runtime/         Logs y ficheros de coordinación entre procesos
 
 ## Ficheros versionados
 
-`data/dataset_sdn.csv` se incluye porque generarlo lleva unas cuatro
+`data/dataset_sdn.csv` se incluye porque generarlo lleva unas seis
 horas. Es la generación con la que se entrena el modelo desplegado; la
 otra generación, usada solo como referencia de variabilidad, no se
 versiona. Los modelos (`models/*.pkl`) y los datos
