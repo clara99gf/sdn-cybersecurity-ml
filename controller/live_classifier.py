@@ -107,14 +107,21 @@ class LiveClassifier:
                     pass
             self._cat_maps[col] = m
 
+        self.reset_windows()
+        self._last_window = {"distinct_ports": 0, "distinct_targets": 0,
+                             "flows_to_target": 0, "distinct_sources": 0}
+
+    def reset_windows(self):
+        """Vacía las ventanas temporales. El controlador de defensa lo llama
+        cada vez que vacía las tablas (inicio de prueba y cambio de
+        etiqueta), igual que preprocessing.py reinicia la ventana en cada
+        fase: así una ventana nunca mezcla eventos de dos fases."""
         # WindowTrackers en vivo (mismos que preprocessing.py, ver allí
         # el porqué de cada clave/valor).
         self._src_port = WindowTracker(self.window_s)   # origen -> puerto dst
         self._src_dst = WindowTracker(self.window_s)    # origen -> destino
         self._dst_src = WindowTracker(self.window_s)    # (destino,puerto) -> origen
         self._last_ports_by_src = {}
-        self._last_window = {"distinct_ports": 0, "distinct_targets": 0,
-                             "flows_to_target": 0, "distinct_sources": 0}
 
     # -- codificación de categóricas igual que en el preprocesado -------
     def _encode_categorical(self, col, value):

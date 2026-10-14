@@ -314,7 +314,9 @@ def plot_confusion_live(events_csv):
     cm = confusion_matrix(df["true_label"], df["predicted_label"], labels=labels)
     fig, ax = plt.subplots(figsize=(6, 5))
     ConfusionMatrixDisplay(cm, display_labels=labels).plot(
-        ax=ax, cmap="Blues", colorbar=False, xticks_rotation=45)
+        ax=ax, cmap="Blues", colorbar=False, xticks_rotation=45, values_format="d")
+    ax.set_xlabel("Clase predicha")
+    ax.set_ylabel("Clase real")
     n = df["run"].nunique()
     ax.set_title("Matriz de confusión - detección en vivo"
                  + (f" ({n} ejecuciones)" if n > 1 else ""))

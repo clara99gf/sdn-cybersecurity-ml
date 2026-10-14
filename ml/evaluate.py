@@ -154,7 +154,9 @@ def plot_metrics_bar(metrics_df, out_path):
 def plot_confusion_matrix(cm, class_names, model_display_name, out_path):
     fig, ax = plt.subplots(figsize=(6, 5))
     disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=class_names)
-    disp.plot(ax=ax, cmap="Blues", colorbar=False, xticks_rotation=45)
+    disp.plot(ax=ax, cmap="Blues", colorbar=False, xticks_rotation=45, values_format="d")
+    ax.set_xlabel("Clase predicha")
+    ax.set_ylabel("Clase real")
     ax.set_title(f"Matriz de confusión (out-of-fold) - {model_display_name}")
     plt.tight_layout()
     plt.savefig(out_path, dpi=150)

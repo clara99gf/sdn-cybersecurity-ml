@@ -1,4 +1,4 @@
 class,flows_before_drop,recall_before_drop,flows_after_drop,recall_after_drop
-scanning,383,0.807,6104,0.967
-ddos,283,0.774,2103,0.673
-spoofing,286,0.965,1682,0.842
+scanning,231,0.792,6143,0.981
+ddos,353,0.986,2620,0.41
+spoofing,202,0.911,1145,0.714

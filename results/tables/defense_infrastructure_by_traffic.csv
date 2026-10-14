@@ -1,5 +1,5 @@
 traffic_phase,events,ryu_cpu_mean_pct,ryu_cpu_max_pct,control_latency_mean_ms,control_latency_max_ms,inference_mean_ms,inference_max_ms,inference_std_ms,mitigations
-normal,3865,5.05,50.0,9.11,11.35,1.979,7.818,1.084,24
-scanning,6640,7.72,43.9,18.64,48.63,0.734,24.567,1.434,290
-ddos,2413,7.7,100.6,12.02,49.05,1.819,7.512,0.997,104
-spoofing,1988,4.15,13.0,10.2,14.68,2.19,8.509,2.043,76
+normal,3863,5.54,46.0,8.88,10.31,1.757,7.06,1.043,28
+scanning,6559,6.6,12.0,15.76,72.73,0.578,9.437,0.984,289
+ddos,2997,6.67,68.0,9.37,12.67,1.373,6.857,0.817,124
+spoofing,1369,3.5,12.0,8.44,10.76,2.976,7.959,2.05,68

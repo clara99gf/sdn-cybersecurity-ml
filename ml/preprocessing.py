@@ -14,8 +14,8 @@ Pasos:
      add_temporal_window_features).
   1. Reconstruir la fase de tráfico de cada fila (para agrupar en
      GroupKFold; ver reconstruct_phase_groups).
-  2. Quitar las filas de warmup (el pingAll de arranque, que no es
-     ninguna de las 4 clases).
+  2. Quitar las filas de warmup (el pingAll de arranque y las transiciones
+     entre fases, que no son ninguna de las 4 clases).
   3. Quitar duplicados.
   4. Eliminar identificadores del laboratorio (IP, MAC, timestamp,
      dpid): con solo 16 hosts, el modelo podría memorizarlos en vez de
@@ -90,6 +90,12 @@ def add_temporal_window_features(df: pd.DataFrame, window_s: int = WINDOW_SECOND
     dst_ids = df["_dst_id"].to_numpy()
     dst_ports = df["_dst_port"].to_numpy()
 
+    # Fase de cada fila. Forma parte de todas las claves de las ventanas,
+    # de modo que la ventana se reinicia en cada fase y nunca mezcla
+    # eventos de dos fases, igual que en vivo, donde el controlador vacía
+    # las ventanas en cada cambio de fase (LiveClassifier.reset_windows).
+    phase_ids = df["phase_id"].to_numpy() if "phase_id" in df.columns else np.zeros(len(df), dtype=int)
+
     src_port_tracker = WindowTracker(window_s)   # origen  -> puerto destino
     src_dst_tracker = WindowTracker(window_s)    # origen -> destino
     # Clave (destino, puerto), no solo destino: así solo cuenta tráfico
@@ -112,13 +118,15 @@ def add_temporal_window_features(df: pd.DataFrame, window_s: int = WINDOW_SECOND
         # puerto real. Las filas sin puerto (ARP/ICMP) heredan el último
         # valor de su origen en vez de contar su relleno -1 como un puerto
         # más, que falsearía el recuento en pleno escaneo.
+        src_key = (phase_ids[i], src_ids[i])
         if dst_ports[i] >= 0:
-            _, distinct_ports[i] = src_port_tracker.add(src_ids[i], dst_ports[i], ts[i])
-            last_ports_by_src[src_ids[i]] = distinct_ports[i]
+            _, distinct_ports[i] = src_port_tracker.add(src_key, dst_ports[i], ts[i])
+            last_ports_by_src[src_key] = distinct_ports[i]
         else:
-            distinct_ports[i] = last_ports_by_src.get(src_ids[i], 0)
-        _, distinct_targets[i] = src_dst_tracker.add(src_ids[i], dst_ids[i], ts[i])
-        total, n_distinct_src = dst_src_tracker.add((dst_ids[i], dst_ports[i]), src_ids[i], ts[i])
+            distinct_ports[i] = last_ports_by_src.get(src_key, 0)
+        _, distinct_targets[i] = src_dst_tracker.add(src_key, dst_ids[i], ts[i])
+        total, n_distinct_src = dst_src_tracker.add(
+            (phase_ids[i], dst_ids[i], dst_ports[i]), src_ids[i], ts[i])
         flows_to_target[i] = total
         distinct_sources[i] = n_distinct_src
 

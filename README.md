@@ -1,4 +1,4 @@
-# Tecnologías SDN e Inteligencia Artificial como Mecanismos de Mitigación de Incidentes de Ciberseguridad
+# Tecnologías SDN e Inteligencia Artificial como Mecanismo de Mitigación de Incidentes de Ciberseguridad
 
 Sistema que combina Redes Definidas por Software (SDN) e Inteligencia
 Artificial para detectar y mitigar en vivo ataques de **scanning**,
@@ -64,13 +64,17 @@ legítimas.
 
 - **Etiquetado por flujo**: cada ataque declara sus actores (atacante,
   víctimas, identidad suplantada) y solo los flujos que los involucran,
-  en ambos sentidos, se etiquetan como ataque.
+  en ambos sentidos, se etiquetan como ataque. El tráfico de transición
+  entre fases (restos de la fase que termina y preparación de la
+  siguiente) se etiqueta como `warmup` y se descarta, igual que el de
+  arranque.
 - **Evaluación sin fuga de información**: `GroupKFold` agrupado por fase,
   con escalado y selección de características dentro de cada partición.
 - **Mismo cálculo en entrenamiento y en vivo**: la fase 3 reutiliza el
   generador de tráfico de la fase 1, el mismo cálculo de contadores y
   tasas del monitor, el mismo módulo de ventanas temporales
-  (`feature_windows.py`) y el mismo criterio de etiquetado, para evitar
+  (`feature_windows.py`, con la ventana reiniciada en cada fase) y el
+  mismo criterio de etiquetado, para evitar
   diferencias entre lo que el modelo vio al entrenar y lo que ve en vivo.
 - **Mitigación por conversación**: se bloquea el par MAC origen → MAC
   destino, en todos los switches, tras confirmarlo en tres sondeos, y
@@ -98,21 +102,21 @@ legítimas.
   regla DROP el ataque queda cortado, y lo que el controlador sigue
   viendo son reglas reactivas anteriores que expiran sin tráfico (las
   reglas DROP en sí se excluyen del procesamiento). Además, cuando la
-  regla caduca y el ataque rebrota, nunca recupera la intensidad inicial
-  porque se le vuelve a cortar enseguida. Como el modelo reconoce el
-  DDoS sobre todo por volumen, su recall por flujo (0,685) queda por
-  debajo del que tiene mientras el ataque está a pleno rendimiento
-  (0,774 hasta el primer bloqueo, `defense_recall_around_drop.csv`). Es
-  consecuencia del éxito de la mitigación, no de un fallo del modelo.
+  regla caduca y el ataque rebrota, se le vuelve a cortar enseguida. En
+  el DDoS, el recall por flujo (0,685) queda por debajo del que tiene
+  hasta el primer bloqueo (0,774, `defense_recall_around_drop.csv`),
+  mientras que en el scanning sube tras el bloqueo: el efecto no tiene
+  el mismo signo en todas las clases.
 - **La detección en vivo no es independiente de la política de
   mitigación.** Cuanto antes se bloquee una conversación, menos flujos
   de ese ataque llega a observar el controlador, y esos flujos son
   además los de menor intensidad. Las cifras de detección de la fase 3
   hay que leerlas junto al umbral de confirmación con el que se
   obtuvieron.
-- **Detección por volumen.** El modelo identifica el DDoS principalmente
-  por su tasa de paquetes, así que un ataque lento y sostenido, por
-  debajo de esa tasa, podría pasar desapercibido.
+- **Ataques de baja tasa sin evaluar.** No se ha medido en qué
+  características se apoya el modelo para cada clase (la importancia se
+  calcula para todas a la vez), así que no se sabe cómo se comportaría
+  ante un DDoS lento y sostenido, de menor tasa que los evaluados.
 - **Coste de los falsos positivos.** Medidos por conversación, 24 de las 124
   conversaciones legítimas observadas en las pruebas de tráfico normal se
   bloquearon por error (19,4 %): alrededor de una de cada cinco sufre un corte
@@ -132,7 +136,8 @@ legítimas.
   Mininet; en una red real vendría de DHCP o de un inventario.
 - Los tiempos de inferencia offline (lotes de decenas de miles de flujos)
   y en vivo (lotes de unos pocos) no son comparables directamente: la
-  diferencia es el coste fijo por llamada, no el modelo.
+  diferencia se debe al coste fijo por llamada y a que offline la
+  predicción usa todos los núcleos, no al modelo.
 
 ## Estructura
 
@@ -168,7 +173,10 @@ logs/, runtime/         Logs y ficheros de coordinación entre procesos
 
 ## Ficheros versionados
 
-Los modelos (`models/*.pkl`) y los datos
+`data/dataset_sdn.csv` se incluye porque generarlo lleva unas cuatro
+horas. Es la generación con la que se entrena el modelo desplegado; la
+otra generación, usada solo como referencia de variabilidad, no se
+versiona. Los modelos (`models/*.pkl`) y los datos
 procesados no se incluyen: se regeneran en unos tres minutos con
 `ml/run_02_ml.py`. `results/` sí se incluye, como evidencia directa de
 los resultados, incluido `results/events/` con el registro por flujo de

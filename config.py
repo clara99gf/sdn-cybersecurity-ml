@@ -86,7 +86,7 @@ LINK_BANDWIDTH_MBPS = 10    # Ancho de banda de cada enlace virtual
 # (run_01_dataset.py, mininet_lab/, controller/sdn_monitor.py)
 # --------------------------------------------------------------- #
 # Criterio de parada de la generación. A unas 300 filas por fase, dan
-# alrededor de 900 fases-
+# alrededor de 900 fases.
 TARGET_ROWS = 300000
 
 # Techo de seguridad (segundos) por si no se alcanzan las TARGET_ROWS.
@@ -98,13 +98,18 @@ MIN_PHASE_DURATION = 10
 MAX_PHASE_DURATION = 25
 
 # Tope aproximado de filas por fase, para que ninguna domine el
-# conjunto. Se comprueba entre acciones, así que no interrumpe una
-# herramienta ya lanzada (nmap, hping3, iperf): 242 de las 909 fases superan las 500.
+# conjunto. Se comprueba mientras la fase está en curso, así que no
+# interrumpe una herramienta ya lanzada (nmap, hping3, iperf): una parte
+# de las fases lo supera.
 MAX_ROWS_PER_PHASE = 500
 
-# Pausas entre fases y antes de la primera, para que los flujos de la
-# anterior expiren y no se mezclen con la siguiente.
+# Pausa entre el cierre de una fase y el inicio de la siguiente. Al
+# cerrar la fase, el generador escribe la etiqueta "warmup" y el
+# controlador vacía las tablas (ver _settle en traffic_generator.py); la
+# pausa le da tiempo a hacerlo antes de que empiece la siguiente.
 PHASE_SETTLE_SECONDS = 1.5
+# Antes de la primera fase, la espera sí deja expirar por inactividad los
+# flujos del pingAll inicial.
 STARTUP_SETTLE_SECONDS = FLOW_IDLE_TIMEOUT + 2
 
 # Cada ejecución empieza un CSV nuevo; el segundo decide si el anterior
@@ -112,8 +117,9 @@ STARTUP_SETTLE_SECONDS = FLOW_IDLE_TIMEOUT + 2
 RESET_DATASET_ON_START = True
 ARCHIVE_PREVIOUS_DATASET = False
 
-# Escribe las filas del calentamiento con la etiqueta "warmup". El
-# preprocesado las descarta, pero permiten revisar el arranque.
+# Escribe las filas fuera de fase (el arranque y las transiciones entre
+# fases) con la etiqueta "warmup". El preprocesado las descarta, pero
+# permiten revisarlas.
 WRITE_WARMUP_ROWS = True
 
 # Registra cada paquete TCP con sus flags. Solo para depuración: en una
@@ -135,7 +141,6 @@ for _d in (DATA_PROCESSED_DIR, MODELS_DIR, FIGURES_DIR, TABLES_DIR):
 # Semilla fija para garantizar la reproducibilidad de la fase 2
 # cuando se ejecuta de nuevo bajo las mismas condiciones.
 RANDOM_STATE = 42
-TEST_SIZE = 0.2
 
 # Nº de características que se conservan tras la selección por
 # importancia (Random Forest), dentro de cada partición. Se eligen 15:
@@ -145,8 +150,9 @@ N_FEATURES = 15
 
 # Ventana temporal (segundos) de las 4 características de "patrón entre
 # flujos". Es del orden de FLOW_IDLE_TIMEOUT, así que abarca la vida
-# típica de un flujo, y queda por debajo de MIN_PHASE_DURATION, así que
-# nunca mezcla dos fases.
+# típica de un flujo. La ventana se reinicia en cada fase (por phase_id
+# en el preprocesado y al vaciar las tablas en vivo), así que nunca
+# mezcla dos fases.
 #
 # La usan ml/preprocessing.py (modo lote) y controller/live_classifier.py
 # (modo evento) y deben coincidir: si no, el modelo vería en detección

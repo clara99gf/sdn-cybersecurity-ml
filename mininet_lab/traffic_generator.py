@@ -79,7 +79,17 @@ def _log(msg):
 
 
 def _settle():
-    """Pausa de asentamiento al final de una fase (ver PHASE_SETTLE_SECONDS)."""
+    """Cierra la fase que termina y hace la pausa previa a la siguiente (ver
+    PHASE_SETTLE_SECONDS).
+
+    Escribe la etiqueta "warmup" (tráfico fuera de fase), y el controlador,
+    al ver el cambio, vacía las tablas. Así los flujos residuales de la fase
+    que termina, ya sin tráfico, no se registran con su etiqueta, y el
+    calentamiento ARP de la fase siguiente, que se hace antes de su
+    set_label(), queda también como "warmup". El preprocesado descarta esas
+    filas; en la fase 3, el controlador las cuenta como tráfico normal.
+    """
+    set_label("warmup")
     time.sleep(SETTLE)
 
 
@@ -458,7 +468,8 @@ def generate_dataset(net, total_duration=None, min_phase=None, max_phase=None, t
         phase(net, phase_duration)
         elapsed += phase_duration + SETTLE
         n_phases += 1
-    set_label("normal")
+    # La última fase ya ha dejado la etiqueta en "warmup" (ver _settle), así
+    # que lo que quede hasta que se detenga el controlador se descarta.
     _kill_all_attack_tools()  # nada debe seguir enviando tráfico al terminar
     info(f"*** Generación de tráfico finalizada. "
          f"Filas totales: {_count_csv_rows()}. Fases ejecutadas: {n_phases}.\n")

@@ -122,6 +122,16 @@ EVENT_HEADERS = [
     "ryu_cpu_percent",
 ]
 
+def _read_phase_key():
+    """(etiqueta, phase_id) de LABEL_FILE, o None si no se puede leer. Es la
+    clave con la que _label_watch_loop detecta los cambios de fase."""
+    try:
+        with open(config.LABEL_FILE) as f:
+            parts = f.read().strip().split(",")
+    except OSError:
+        return None
+    return (parts[0], parts[1] if len(parts) > 1 else "0")
+
 
 def _read_label_file():
     """Lee LABEL_FILE (lo escribe set_label() de traffic_generator, igual
@@ -370,12 +380,7 @@ class SDNDefense(app_manager.RyuApp):
         Se compara por (etiqueta, phase_id) para detectar también dos fases
         consecutivas del mismo tipo."""
         while True:
-            try:
-                with open(config.LABEL_FILE) as f:
-                    parts = f.read().strip().split(",")
-                key = (parts[0], parts[1] if len(parts) > 1 else "0")
-            except OSError:
-                key = None
+            key = _read_phase_key()
             if key != self._last_phase_key:
                 # Solo vacía durante una prueba: fuera de ella no hay nada
                 # que aislar, y al activar ya se vacía en _handle_transition.
@@ -440,6 +445,9 @@ class SDNDefense(app_manager.RyuApp):
         self.pending_arp_unsolicited.clear()
         self.mitigated.clear()
         self._attack_rounds.clear()
+        # Las ventanas temporales también empiezan de cero, igual que el
+        # preprocesado reinicia la ventana en cada fase.
+        self.classifier.reset_windows()
         # ip_to_mac NO se limpia (identidad de host, igual que el monitor).
         self.logger.info("[defense] Switches limpios y table-miss reinstalada.")
 
@@ -498,6 +506,11 @@ class SDNDefense(app_manager.RyuApp):
         phase = phase or "?"
         run = run or "1"
         phase_label, actors = _read_label_file()
+        # La etiqueta ya ha cambiado pero _label_watch_loop aún no ha vaciado
+        # las tablas: esta respuesta describe flujos de la fase anterior y no
+        # se procesa, para no etiquetarlos con la nueva (igual que el monitor).
+        if _read_phase_key() != self._last_phase_key:
+            return
 
         t_event = time.perf_counter()   # inicio de la latencia del plano de control
         dp = ev.msg.datapath
@@ -535,8 +548,11 @@ class SDNDefense(app_manager.RyuApp):
                     phase_label, actors, raw.get("ip_src"), raw.get("ip_dst"),
                     raw.get("arp_spa"), raw.get("arp_tpa"),
                 )
+                # Tráfico de transición al cerrar la prueba (_settle): no
+                # pertenece a ninguna clase. Igual que la fase 1 lo descarta
+                # del dataset, aquí ni se evalúa ni se mitiga.
                 if true_label == "warmup":
-                    true_label = "normal"
+                    continue
                 mitigated, latency_ms = False, None
                 if label in ATTACK_CLASSES:
                     mitigated = self._mitigate(raw.get("eth_src"), raw.get("eth_dst"), now)

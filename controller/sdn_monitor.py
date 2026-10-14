@@ -554,6 +554,12 @@ class SDNFlowMonitor(app_manager.RyuApp):
         body = ev.msg.body
         dpid = ev.msg.datapath.id
         phase_label, phase_id, actors = self._read_current_label()
+        # La etiqueta ya ha cambiado pero _label_watch_loop (que la comprueba
+        # cada 0,3 s) aún no ha vaciado las tablas: esta respuesta describe
+        # flujos de la fase anterior y no se registra, para no escribirlos
+        # con la etiqueta y el phase_id de la nueva.
+        if (phase_label, phase_id) != self._last_label:
+            return
         now = time.time()
 
         # Filtrar la regla de table-miss (prioridad 0) para procesar solo flujos individuales

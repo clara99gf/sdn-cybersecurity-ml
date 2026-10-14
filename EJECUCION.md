@@ -21,7 +21,8 @@ sudo venv/bin/python3 run_01_dataset.py
 
 Arranca el controlador Ryu (`controller/sdn_monitor.py`), levanta la
 topología, genera fases de tráfico aleatorias hasta alcanzar
-`TARGET_ROWS` (300.000 filas, unas 4 horas) y al terminar, o con
+`TARGET_ROWS` (300.000 filas, contadas las de transición entre fases que
+luego se descartan; unas 4 horas) y al terminar, o con
 `Ctrl+C`, detiene el controlador y limpia Mininet. Si el controlador no
 arranca, muestra en la terminal las últimas líneas de su log.
 
@@ -82,9 +83,14 @@ la comprobación real, que debe salir con 0 % de pérdida.
 | 5 | Batería completa: los cuatro tipos seguidos, repetidos `DEFENSE_BATTERY_RUNS` veces (10 por defecto, unos 25 minutos). Resumen global, todas las gráficas y las tablas |
 | 6 | Salir limpiando el entorno |
 
-Cada nueva prueba borra los resultados anteriores de la fase 3. La duración de
-las pruebas y los parámetros de la mitigación están en la sección
-"Fase 3" de `config.py`.
+Cada opción del menú (1-5) empieza borrando los resultados anteriores de
+la fase 3: el registro `results/events/defense_events.csv` y las tablas
+y figuras de `results/tables/defense_*.csv` y `results/figures/defense/`,
+incluidas las de la batería. La copia `defense_events_battery.csv` se
+conserva, y con ella se pueden regenerar las tablas y figuras de la
+batería (ver el final de esta sección). La duración de las pruebas y los
+parámetros de la mitigación están en la sección "Fase 3" de
+`config.py`.
 
 ### Resultados de la fase 3
 
