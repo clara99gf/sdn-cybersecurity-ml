@@ -91,7 +91,7 @@ pruebas de tráfico normal.
 - **El entorno de emulación se satura en momentos puntuales.** Mininet y
   Ryu comparten una única máquina. En la generación del dataset, 42 de las
   675 fases de ataque (6,2 %) no registraron ningún flujo de su clase,
-  con tramos de hasta 21 s sin filas, sobre todo tras un DDoS sin límite
+  con tramos de hasta 35 s sin filas, sobre todo tras un DDoS sin límite
   de tasa. Las etiquetas no se ven afectadas, pero se pierden muestras de
   ataque.
 - **Dos generaciones del dataset, no una muestra amplia.** La generación
@@ -120,20 +120,20 @@ pruebas de tráfico normal.
   todas las clases.
 - **La detección en vivo no es independiente de la política de
   mitigación.** Cuanto antes se bloquee una conversación, menos flujos
-  de ese ataque llega a observar el controlador, y esos flujos son
-  además los de menor intensidad. Las cifras de detección de la fase 3
-  hay que leerlas junto al umbral de confirmación con el que se
+  de ese ataque llega a observar el controlador, y en el DDoS los que observa
+  tras el bloqueo son sobre todo reglas sin tráfico. Las cifras de detección
+  de la fase 3 hay que leerlas junto al umbral de confirmación con el que se
   obtuvieron.
 - **Ataques de baja tasa sin evaluar.** No se ha medido en qué
   características se apoya el modelo para cada clase (la importancia se
   calcula para todas a la vez), así que no se sabe cómo se comportaría
   ante un DDoS lento y sostenido, de menor tasa que los evaluados.
-- **Coste de los falsos positivos.** Medidos por conversación, 24 de las 124
-  conversaciones legítimas observadas en las pruebas de tráfico normal se
-  bloquearon por error (19,4 %): alrededor de una de cada cinco sufre un corte
-  de 20 s. Reducirlo más podría requerir subir el umbral de confirmación o
-  exigir la confirmación en varios switches, a costa de retrasar la respuesta
-  ante un ataque real.
+- **Coste de los falsos positivos.** Medidos por conversación, 28 de las
+  123 conversaciones legítimas observadas en las pruebas de tráfico normal
+  se bloquearon por error (22,8 %): algo más de una de cada cinco sufre
+  un corte de 20 s. Reducirlo más podría requerir subir el umbral de
+  confirmación o exigir la confirmación en varios switches, a costa de
+  retrasar la respuesta ante un ataque real.
 - **El recall de mitigación mide cobertura, no supresión continua**: una
   conversación cuenta como bloqueada si se le aplicó un DROP en algún
   momento. Como las reglas duran 20 s, un ataque prolongado se bloquea,

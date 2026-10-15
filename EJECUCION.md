@@ -49,7 +49,7 @@ venv/bin/python3 ml/run_02_ml.py
 
 Equivale a ejecutar en orden `ml/preprocessing.py`, `ml/train.py` y
 `ml/evaluate.py` (se pueden lanzar por separado para depurar). Tarda
-unos tres minutos.
+unos dos minutos.
 
 Genera `data/processed/`, los modelos en `models/` (incluido
 `best_model.pkl`, el que usa la fase 3) y, en `results/tables/` y
@@ -80,7 +80,7 @@ la comprobación real, que debe salir con 0 % de pérdida.
 | Opción | Qué hace |
 |---|---|
 | 1-4 | Prueba individual de 30 s con un solo tipo de tráfico (normal, scanning, ddos o spoofing): resumen en terminal y su gráfica |
-| 5 | Batería completa: los cuatro tipos seguidos, repetidos `DEFENSE_BATTERY_RUNS` veces (10 por defecto, unos 25 minutos). Resumen global, todas las gráficas y las tablas |
+| 5 | Batería completa: los cuatro tipos seguidos, repetidos `DEFENSE_BATTERY_RUNS` veces (10 por defecto, algo menos de media hora). Resumen global, todas las gráficas y las tablas |
 | 6 | Salir limpiando el entorno |
 
 Cada opción del menú (1-5) empieza borrando los resultados anteriores de
@@ -151,4 +151,5 @@ venv/bin/python3 defense/plots.py results/events/defense_events_battery.csv
 ```bash
 sudo mn -c
 sudo pkill -f ryu-manager
+sudo pkill -f sdn_defense.py
 ```

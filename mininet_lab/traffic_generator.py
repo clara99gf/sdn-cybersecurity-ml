@@ -87,7 +87,7 @@ def _settle():
     que termina, ya sin tráfico, no se registran con su etiqueta, y el
     calentamiento ARP de la fase siguiente, que se hace antes de su
     set_label(), queda también como "warmup". El preprocesado descarta esas
-    filas; en la fase 3, el controlador las cuenta como tráfico normal.
+    filas; en la fase 3, el controlador no las evalúa.
     """
     set_label("warmup")
     time.sleep(SETTLE)

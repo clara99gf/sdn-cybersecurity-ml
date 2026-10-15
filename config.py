@@ -86,11 +86,11 @@ LINK_BANDWIDTH_MBPS = 10    # Ancho de banda de cada enlace virtual
 # (run_01_dataset.py, mininet_lab/, controller/sdn_monitor.py)
 # --------------------------------------------------------------- #
 # Criterio de parada de la generación. A unas 300 filas por fase, dan
-# alrededor de 900 fases.
+# entre 900 y 1.000 fases.
 TARGET_ROWS = 300000
 
 # Techo de seguridad (segundos) por si no se alcanzan las TARGET_ROWS.
-# No es la duración esperada, que ronda las cuatro horas.
+# No es la duración esperada, que ronda las seis horas.
 TOTAL_DURATION = 23700
 
 # Duración de cada fase de tráfico (segundos), sorteada en este rango.
@@ -144,8 +144,8 @@ RANDOM_STATE = 42
 
 # Nº de características que se conservan tras la selección por
 # importancia (Random Forest), dentro de cada partición. Se eligen 15:
-# las 7 descartadas suman un 6.1% de la importancia y su
-# ausencia no cambia el F1.
+# las 7 descartadas suman en torno al 6% de la importancia (5,8% con el
+# dataset publicado). Es un umbral de diseño, no un valor optimizado.
 N_FEATURES = 15
 
 # Ventana temporal (segundos) de las 4 características de "patrón entre
