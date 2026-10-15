@@ -4,9 +4,8 @@ Requisito previo (una sola vez): `./setup.sh`, que instala las
 dependencias y crea el entorno virtual `venv/`.
 
 Las fases 1 y 3 usan Mininet y necesitan `sudo`. Se lanzan siempre con
-`sudo venv/bin/python3 ...` (y no con `sudo python3`), porque `sudo`
-ignora el venv activado; con la ruta explícita se usa el Python del venv
-con permisos de root.
+`sudo venv/bin/python3 ...` para utilizar el intérprete del entorno virtual
+con dichos permisos.
 
 El orden importa: cada fase consume lo que deja la anterior. La 2
 necesita el CSV de la 1, y la 3 necesita los modelos de la 2. Si solo
@@ -22,9 +21,9 @@ sudo venv/bin/python3 run_01_dataset.py
 Arranca el controlador Ryu (`controller/sdn_monitor.py`), levanta la
 topología, genera fases de tráfico aleatorias hasta alcanzar
 `TARGET_ROWS` (300.000 filas, contadas las de transición entre fases que
-luego se descartan; unas 6 horas) y al terminar, o con
-`Ctrl+C`, detiene el controlador y limpia Mininet. Si el controlador no
-arranca, muestra en la terminal las últimas líneas de su log.
+luego se descartan; unas 6 horas) y al terminar, detiene el controlador y
+limpia Mininet. Si el controlador no arranca, muestra en la terminal las
+últimas líneas de su log.
 
 Genera `data/dataset_sdn.csv`. El tamaño y la duración se ajustan en
 `config.py` (`TARGET_ROWS`, `TOTAL_DURATION`).
@@ -35,7 +34,7 @@ Genera `data/dataset_sdn.csv`. El tamaño y la duración se ajustan en
 ```bash
 # Terminal 1
 sudo venv/bin/ryu-manager controller/sdn_monitor.py
-# Terminal 2 (la variable va DESPUÉS de sudo)
+# Terminal 2 
 sudo SDN_MANUAL_TEST=1 venv/bin/python3 mininet_lab/topology.py
 ```
 
@@ -49,7 +48,7 @@ venv/bin/python3 ml/run_02_ml.py
 
 Equivale a ejecutar en orden `ml/preprocessing.py`, `ml/train.py` y
 `ml/evaluate.py` (se pueden lanzar por separado para depurar). Tarda
-unos dos minutos.
+unos tres minutos.
 
 Genera `data/processed/`, los modelos en `models/` (incluido
 `best_model.pkl`, el que usa la fase 3) y, en `results/tables/` y
