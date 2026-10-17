@@ -190,5 +190,14 @@ versiona. Los modelos (`models/*.pkl`) y los datos
 procesados no se incluyen: se regeneran en unos tres minutos con
 `ml/run_02_ml.py`. `results/` sí se incluye, como evidencia directa de
 los resultados, incluido `results/events/` con el registro por flujo de
-la última batería. En `docs/` está la memoria del TFG, que es el
-documento donde se analizan en detalle estos resultados.
+la última batería. 
+
+`logs/` incluye los registros de las ejecuciones que produjeron el dataset
+y la batería versionados: los del controlador (`ryu_controller.log` en la
+fase 1 y `ryu_defense.log` en la fase 3) y los del tráfico
+(`traffic_generator.log.gz` y `defense_traffic.log`). El del generador de
+la fase 1 se incluye comprimido, porque sin comprimir ocupa 159 MB y supera
+el límite de tamaño de GitHub.
+
+En `docs/` está la memoria del TFG, que es el
+documento donde se analizan en detalle estos resultados. 

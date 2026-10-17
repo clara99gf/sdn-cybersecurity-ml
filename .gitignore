@@ -25,11 +25,13 @@ data/dataset_sdn_*.csv
 models/*
 !models/.gitkeep
 
-# Logs y ficheros de coordinación en tiempo de ejecución
-logs/*
-!logs/.gitkeep
+# Ficheros de coordinación en tiempo de ejecución
 runtime/*
 !runtime/.gitkeep
+
+# Log del generador de la fase 1 sin comprimir (supera el límite de
+# GitHub); se versiona comprimido como traffic_generator.log.gz
+logs/traffic_generator.log
 
 # Capturas de tráfico
 *.pcap
