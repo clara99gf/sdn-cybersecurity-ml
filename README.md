@@ -92,8 +92,7 @@ pruebas de tráfico normal.
   Ryu comparten una única máquina. En la generación del dataset, 42 de las
   675 fases de ataque (6,2 %) no registraron ningún flujo de su clase,
   con tramos de hasta 35 s sin filas, sobre todo tras un DDoS sin límite
-  de tasa. Las etiquetas no se ven afectadas, pero se pierden muestras de
-  ataque.
+  de tasa.
 - **Dos generaciones del dataset, no una muestra amplia.** La generación
   es estocástica (se sortean tipos de fase, variantes de ataque y hosts
   atacantes). Se generaron dos con la misma configuración, y el F1 macro
