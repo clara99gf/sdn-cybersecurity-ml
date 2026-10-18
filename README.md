@@ -131,9 +131,9 @@ pruebas de tráfico normal.
 - **Coste de los falsos positivos.** Medidos por conversación, 28 de las
   123 conversaciones legítimas observadas en las pruebas de tráfico normal
   se bloquearon por error (22,8 %): algo más de una de cada cinco sufre
-  un corte de 20 s. Reducirlo más podría requerir subir el umbral de
-  confirmación o exigir la confirmación en varios switches, a costa de
-  retrasar la respuesta ante un ataque real.
+  un corte de 20 s. Subir el umbral de confirmación podría reducirlos, a
+  costa de retrasar la respuesta ante un ataque real, pero solo se ha
+  evaluado un umbral, el de tres confirmaciones.
 - **El recall de mitigación mide cobertura, no supresión continua**: una
   conversación cuenta como bloqueada si se le aplicó un DROP en algún
   momento. Como las reglas duran 20 s, un ataque prolongado se bloquea,
