@@ -54,8 +54,9 @@ reunidas (± 0,016, desviación típica de los F1 macro de cada partición).
 
 ### Fase 3: detección y mitigación en vivo
 En 10 ejecuciones de la batería completa, la detección obtuvo un
-**F1 macro de 0,756 ± 0,059** por flujo (media ± desviación típica
-poblacional de las 10 ejecuciones).
+**F1 macro de 0,791** por flujo con todas las ejecuciones reunidas,
+comparable con el de la fase 2, y de 0,756 ± 0,059 como media ± desviación 
+típica poblacional de las 10 ejecuciones.
 
 A nivel de mitigación, se bloquearon **390 de 395 conversaciones de ataque
 (recall 0,987)**, con el primer bloqueo unos 2 s después del primer flujo
